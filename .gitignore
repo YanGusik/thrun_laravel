@@ -1,0 +1,37 @@
+/vendor/
+/node_modules/
+
+# Dependencies
+composer.lock
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+CLAUDE.md
+*.swo
+.DS_Store
+
+# Test artifacts
+/coverage/
+/.phpunit.cache/
+/.testo/
+*.cache
+/temp/
+
+# Build
+/build/
+/dist/
+
+# In progress
+docs
+
+# Benchmarks (not part of the package)
+/bench/
+#compose.yml
+#Dockerfile

@@ -1,0 +1,22 @@
+{
+    "name": "yangusik/thrun-laravel",
+    "description": "Laravel adapter for Thrun async queue worker",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.4",
+        "ext-pcntl": "*",
+        "ext-redis": "*",
+        "yangusik/thrun": "*",
+        "illuminate/console": "^11.0 || ^13.0",
+        "illuminate/container": "^11.0 || ^13.0",
+        "illuminate/support": "^11.0 || ^13.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Thrun\\Laravel\\": "src/"
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
