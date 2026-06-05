@@ -7,6 +7,7 @@ namespace Thrun\Laravel\Worker;
 use Illuminate\Contracts\Config\Repository as ConfigContract;
 use Illuminate\Contracts\Container\Container;
 use Thrun\Laravel\Handler\AsThrunHandler;
+use Thrun\Laravel\Handler\Attribute\ThrunJob;
 use Thrun\Laravel\Transport\TransportFactory;
 use Thrun\Supervisor\Supervisor;
 use Thrun\Supervisor\SupervisorOptions;
@@ -46,6 +47,11 @@ final readonly class ThrunWorkerFactory
         $threads = $workerConfig['threads'] ?? 4;
         $concurrency = $workerConfig['concurrency'] ?? 10;
 
+        $resolvedMiddleware = array_merge(
+            $this->resolveMiddleware($supervisorConfig['middleware'] ?? []),
+            $middleware,
+        );
+
         $receiver = $this->transportFactory->createReceiver(
             queueNames: $supervisorConfig['queues'] ?? [],
             strategyConfig: $supervisorConfig['strategy'] ?? [],
@@ -64,7 +70,7 @@ final readonly class ThrunWorkerFactory
                 threads: $threads,
                 concurrency: $concurrency,
                 bootloader: $this->createBootloader(),
-                middleware: $middleware,
+                middleware: $resolvedMiddleware,
                 onDispatch: $onDispatch,
                 onResult: $onResult,
             ),
@@ -115,7 +121,7 @@ final readonly class ThrunWorkerFactory
     }
 
     /**
-     * Auto-discover handlers in the given namespace.
+     * Auto-discover handlers and self-handling jobs in the given namespace.
      *
      * @return array<string, callable(object|array, ?Acknowledger): void>
      */
@@ -130,9 +136,9 @@ final readonly class ThrunWorkerFactory
         $directory = $this->container->basePath() . '/' . $dirPath;
 
         if (is_dir($directory)) {
-            $files = glob($directory . '/*' . $handlerSuffix . '.php');
-            // var_dump(['found_files' => $files]);
-            foreach ($files as $file) {
+            $handlerFiles = glob($directory . '/*' . $handlerSuffix . '.php');
+            $jobFiles = glob($directory . '/*Job.php');
+            foreach (array_merge($handlerFiles, $jobFiles) as $file) {
                 require_once $file;
             }
         }
@@ -142,34 +148,40 @@ final readonly class ThrunWorkerFactory
                 continue;
             }
 
-            if (!str_ends_with($class, $handlerSuffix)) {
-                continue;
-            }
-
             $reflection = new \ReflectionClass($class);
             if ($reflection->isAbstract() || $reflection->isInterface()) {
                 continue;
             }
 
-            $attributes = $reflection->getAttributes(AsThrunHandler::class);
-            if ($attributes !== []) {
-                $attr = $attributes[0]->newInstance();
+            // 1. Self-handling job via #[ThrunJob]
+            $jobAttributes = $reflection->getAttributes(ThrunJob::class);
+            if ($jobAttributes !== []) {
+                $handlers[$class] = $this->resolveSelfHandler($class);
+                continue;
+            }
+
+            // 2. Explicit handler via #[AsThrunHandler]
+            $handlerAttributes = $reflection->getAttributes(AsThrunHandler::class);
+            if ($handlerAttributes !== []) {
+                $attr = $handlerAttributes[0]->newInstance();
                 if ($attr->messageClass !== null) {
                     $handlers[$attr->messageClass] = $this->resolveHandler($class);
                     continue;
                 }
             }
 
+            // 3. Naming convention: *Handler -> *Message
+            if (!str_ends_with($class, $handlerSuffix)) {
+                continue;
+            }
+
             $baseName = substr($class, 0, -strlen($handlerSuffix));
             $possibleMessage = str_replace('\\Handlers\\', '\\Messages\\', $baseName) . $messageSuffix;
-            // var_dump(['handler' => $class, 'possibleMessage' => $possibleMessage, 'exists' => class_exists($possibleMessage)]);
             if (class_exists($possibleMessage)) {
                 $handlers[$possibleMessage] = $this->resolveHandler($class);
             }
         }
 
-        // var_dump(['discovered_handlers' => array_keys($handlers)]);
-        // die("[DEBUG] discoverNamespace done\n");
         return $handlers;
     }
 
@@ -199,6 +211,52 @@ final readonly class ThrunWorkerFactory
                 $instance($message);
             }
         };
+    }
+
+    /**
+     * @param class-string $jobClass
+     * @return callable(object|array, ?Acknowledger): void
+     */
+    private function resolveSelfHandler(string $jobClass): \Closure
+    {
+        return static function (object|array $message, Acknowledger $ack) use ($jobClass): void {
+            if (!$message instanceof $jobClass) {
+                throw new \RuntimeException(sprintf(
+                    'Expected job "%s", got "%s"',
+                    $jobClass,
+                    get_debug_type($message),
+                ));
+            }
+
+            if (!is_callable($message)) {
+                throw new \RuntimeException(sprintf(
+                    'Job "%s" must be invokable (__invoke method required)',
+                    $jobClass,
+                ));
+            }
+
+            \Illuminate\Container\Container::getInstance()->call(
+                [$message, '__invoke'],
+                ['ack' => $ack],
+            );
+        };
+    }
+
+    /**
+     * @param list<class-string|object> $middleware
+     * @return list<object>
+     */
+    private function resolveMiddleware(array $middleware): array
+    {
+        $resolved = [];
+        foreach ($middleware as $item) {
+            if (\is_string($item)) {
+                $resolved[] = $this->container->make($item);
+            } else {
+                $resolved[] = $item;
+            }
+        }
+        return $resolved;
     }
 
     private function createBootloader(): \Closure

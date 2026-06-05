@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Thrun\Laravel\Transport;
 
 use Illuminate\Contracts\Config\Repository as ConfigContract;
+use Illuminate\Contracts\Container\Container;
 use Redis;
 use Thrun\Contract\ReceiverInterface;
 use Thrun\Contract\TransportInterface;
@@ -24,9 +25,23 @@ final class TransportFactory
     /** @var array<string, TransportInterface> */
     private array $transports = [];
 
+    /** @var array<string, \Closure(string, array): TransportInterface> */
+    private array $drivers = [];
+
     public function __construct(
         private readonly ConfigContract $config,
+        private readonly ?Container $container = null,
     ) {
+    }
+
+    /**
+     * Register a custom transport resolver.
+     *
+     * @param \Closure(string $queueName, array $queueConfig): TransportInterface $resolver
+     */
+    public function extend(string $type, \Closure $resolver): void
+    {
+        $this->drivers[$type] = $resolver;
     }
 
     /**
@@ -91,6 +106,27 @@ final class TransportFactory
     {
         $type = $queueConfig['transport'] ?? 'redis';
 
+        // 1. Custom closure driver
+        if (isset($this->drivers[$type])) {
+            return ($this->drivers[$type])($name, $queueConfig);
+        }
+
+        // 2. Config-based class driver
+        if (isset($queueConfig['driver']) && \is_string($queueConfig['driver'])) {
+            $driverClass = $queueConfig['driver'];
+
+            if (!\class_exists($driverClass)) {
+                throw new \InvalidArgumentException("Transport driver class \"{$driverClass}\" does not exist");
+            }
+
+            if ($this->container !== null) {
+                return $this->container->make($driverClass, ['name' => $name, 'config' => $queueConfig]);
+            }
+
+            return new $driverClass($name, $queueConfig);
+        }
+
+        // 3. Built-in drivers
         return match ($type) {
             'redis' => $this->createRedisTransport($name),
             'memory' => new InMemoryTransport(),

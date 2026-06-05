@@ -18,7 +18,7 @@ final class ThrunServiceProvider extends ServiceProvider
         $this->mergeConfigFrom(__DIR__ . '/../config/thrun.php', 'thrun');
 
         $this->app->singleton(TransportFactory::class, function ($app) {
-            return new TransportFactory($app['config']);
+            return new TransportFactory($app['config'], $app);
         });
 
         $this->app->singleton(HandlerRegistry::class, function ($app) {

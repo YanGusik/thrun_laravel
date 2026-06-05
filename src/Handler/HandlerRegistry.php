@@ -4,8 +4,7 @@ declare(strict_types=1);
 
 namespace Thrun\Laravel\Handler;
 
-use Illuminate\Contracts\Container\Container;
-use Thrun\Laravel\Contract\HandlerInterface;
+use Thrun\Laravel\Handler\Attribute\ThrunJob;
 use Thrun\Worker\Acknowledger;
 
 final class HandlerRegistry
@@ -23,8 +22,8 @@ final class HandlerRegistry
     }
 
     /**
-     * Auto-discover handlers in the given namespaces using naming convention
-     * or #[AsThrunHandler] attribute.
+     * Auto-discover handlers in the given namespaces using naming convention,
+     * #[AsThrunHandler] attribute or #[ThrunJob] attribute.
      *
      * @param list<string> $namespaces
      */
@@ -54,22 +53,31 @@ final class HandlerRegistry
                 continue;
             }
 
-            if (!str_ends_with($class, $handlerSuffix)) {
-                continue;
-            }
-
             $reflection = new \ReflectionClass($class);
             if ($reflection->isAbstract() || $reflection->isInterface()) {
                 continue;
             }
 
-            $attributes = $reflection->getAttributes(AsThrunHandler::class);
-            if ($attributes !== []) {
-                $attr = $attributes[0]->newInstance();
+            // 1. Self-handling job via #[ThrunJob]
+            $jobAttributes = $reflection->getAttributes(ThrunJob::class);
+            if ($jobAttributes !== []) {
+                $this->handlers[$class] = $this->resolveSelfHandler($class);
+                continue;
+            }
+
+            // 2. Explicit handler via #[AsThrunHandler]
+            $handlerAttributes = $reflection->getAttributes(AsThrunHandler::class);
+            if ($handlerAttributes !== []) {
+                $attr = $handlerAttributes[0]->newInstance();
                 if ($attr->messageClass !== null) {
                     $this->handlers[$attr->messageClass] = $this->resolveHandler($class);
                     continue;
                 }
+            }
+
+            // 3. Naming convention: *Handler -> *Message
+            if (!str_ends_with($class, $handlerSuffix)) {
+                continue;
             }
 
             $possibleMessage = substr($class, 0, -strlen($handlerSuffix)) . $messageSuffix;
@@ -100,6 +108,35 @@ final class HandlerRegistry
             } else {
                 $instance($message);
             }
+        };
+    }
+
+    /**
+     * @param class-string $jobClass
+     * @return callable(object, ?Acknowledger): void
+     */
+    private function resolveSelfHandler(string $jobClass): callable
+    {
+        return static function (object $message, Acknowledger $ack) use ($jobClass): void {
+            if (!$message instanceof $jobClass) {
+                throw new \RuntimeException(sprintf(
+                    'Expected job "%s", got "%s"',
+                    $jobClass,
+                    get_debug_type($message),
+                ));
+            }
+
+            if (!is_callable($message)) {
+                throw new \RuntimeException(sprintf(
+                    'Job "%s" must be invokable (__invoke method required)',
+                    $jobClass,
+                ));
+            }
+
+            \Illuminate\Container\Container::getInstance()->call(
+                [$message, '__invoke'],
+                ['ack' => $ack],
+            );
         };
     }
 }
