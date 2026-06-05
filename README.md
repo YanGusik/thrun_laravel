@@ -4,6 +4,21 @@ Laravel adapter for the async queue worker [**Thrun**](https://github.com/yangus
 
 ---
 
+## Benchmarks
+
+Measured on WSL2, 8GB RAM, PHP 8.6 TrueAsync fork:
+
+| Scenario | IO throughput | CPU throughput | Stable RSS |
+|---|---|---|---|
+| Horizon 1 worker | 18/s | 73/s | 72 MB |
+| Horizon 12 workers | 210/s | 514/s | 949 MB |
+| TrueAsync 1x100 | 1,869/s | 452/s | 44 MB |
+| TrueAsync 12x10 | 2,355/s | 2,059/s | 54 MB |
+
+TrueAsync 12x10 uses **17x less RSS** than Horizon 12 workers, **11x more IO throughput**.
+
+---
+
 ## Installation
 
 ```bash
