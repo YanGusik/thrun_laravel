@@ -8,12 +8,20 @@ Laravel adapter for the async queue worker [**Thrun**](https://github.com/yangus
 
 Measured on WSL2, 8GB RAM, PHP 8.6 TrueAsync fork:
 
-| Scenario | IO throughput | CPU throughput | Stable RSS |
-|---|---|---|---|
-| Horizon 1 worker | 18/s | 73/s | 72 MB |
-| Horizon 12 workers | 210/s | 514/s | 949 MB |
-| TrueAsync 1x100 | 1,869/s | 452/s | 44 MB |
-| TrueAsync 12x10 | 2,355/s | 2,059/s | 54 MB |
+| Scenario     | Config                   | Jobs   | Time   | Throughput | RSS     |
+| ------------ | ------------------------ | ------ | ------ | ---------- | ------- |
+| Horizon IO   | 12 workers               | 1,000  | 12.1s  | 83/s       | 872 MB  |
+| Thrun IO     | 1 thread, 100 coroutines | 1,000  | 2.3s   | 434/s      | 80 MB   |
+| Horizon IO   | 12 workers               | 10,000 | 55.0s  | 182/s      | 1019 MB |
+| Thrun IO     | 1 thread, 100 coroutines | 10,000 | 6.3s   | 1580/s     | 84 MB   |
+| Horizon CPU  | 12 workers               | 100    | 18.4s  | 5.4/s      | 1022 MB |
+| Thrun CPU    | 12 threads               | 100    | 16.3s  | 6.1/s      | 100 MB  |
+| Horizon CPU  | 12 workers               | 1,000  | 162.6s | 6.2/s      | 1023 MB |
+| Thrun CPU    | 12 threads               | 1,000  | 139.5s | 7.2/s      | 101 MB  |
+| Horizon NOOP | 12 workers               | 1,000  | 5.0s   | 198/s      | 656 MB  |
+| Thrun NOOP   | 12 threads               | 1,000  | 2.3s   | 434/s      | 103 MB  |
+
+
 
 TrueAsync 12x10 uses **17x less RSS** than Horizon 12 workers, **11x more IO throughput**.
 
