@@ -444,5 +444,5 @@ The factory will try to resolve the class via Laravel `Container::make()` with `
 
 - PHP (TrueAsync Core) ^8.6
 - Laravel ^11.0
-- [ext-async](https://github.com/yangusik/true-async) (TrueAsync extension)
+- [ext-async](https://github.com/true-async/php-async) (TrueAsync extension)
 - phpredis (TrueAsync fork) (if using Redis transport)
