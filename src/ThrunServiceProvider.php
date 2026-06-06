@@ -6,6 +6,11 @@ namespace Thrun\Laravel;
 
 use Illuminate\Support\ServiceProvider;
 use Thrun\Laravel\Bus\ThrunMessageBus;
+use Thrun\Laravel\Console\ThrunFailedCommand;
+use Thrun\Laravel\Console\ThrunFailedFlushCommand;
+use Thrun\Laravel\Console\ThrunFailedShowCommand;
+use Thrun\Laravel\Console\ThrunFlushCommand;
+use Thrun\Laravel\Console\ThrunRetryCommand;
 use Thrun\Laravel\Console\ThrunWorkCommand;
 use Thrun\Laravel\Handler\HandlerRegistry;
 use Thrun\Laravel\Transport\TransportFactory;
@@ -55,6 +60,11 @@ final class ThrunServiceProvider extends ServiceProvider
         if ($this->app->runningInConsole()) {
             $this->commands([
                 ThrunWorkCommand::class,
+                ThrunFailedCommand::class,
+                ThrunFailedShowCommand::class,
+                ThrunFailedFlushCommand::class,
+                ThrunFlushCommand::class,
+                ThrunRetryCommand::class,
             ]);
 
             $this->publishes([

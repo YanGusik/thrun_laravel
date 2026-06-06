@@ -73,8 +73,6 @@ return [
                 // \App\Middleware\MetricsMiddleware::class,
                 \Thrun\Middleware\CatchMessageMiddleware::class,
             ],
-
-            'failure_transport' => null,
         ],
 
         'heavy_cpu' => [
@@ -107,8 +105,13 @@ return [
             ],
 
             'middleware' => [],
+        ],
+    ],
 
-            'failure_transport' => null,
+    'failed' => [
+        'driver' => env('THRUN_FAILED_DRIVER', 'redis'),
+        'redis' => [
+            'prefix' => env('THRUN_FAILED_PREFIX', 'thrun:failed'),
         ],
     ],
 

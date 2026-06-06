@@ -7,10 +7,14 @@ namespace Thrun\Laravel\Transport;
 use Illuminate\Contracts\Config\Repository as ConfigContract;
 use Illuminate\Contracts\Container\Container;
 use Redis;
+use Thrun\Contract\FailedJobStoreInterface;
 use Thrun\Contract\ReceiverInterface;
+use Thrun\Contract\SenderInterface;
 use Thrun\Contract\TransportInterface;
 use Thrun\Serialization\ClassMapMessageTypeResolver;
 use Thrun\Serialization\JsonSerializer;
+use Thrun\Transport\Failed\NullFailedJobSender;
+use Thrun\Transport\Failed\RedisFailedJobSender;
 use Thrun\Transport\InMemory\InMemoryTransport;
 use Thrun\Transport\MultiQueueReceiver;
 use Thrun\Transport\Policy\ChainPolicy;
@@ -28,6 +32,9 @@ final class TransportFactory
     /** @var array<string, \Closure(string, array): TransportInterface> */
     private array $drivers = [];
 
+    /** @var array<string, \Closure(array): SenderInterface> */
+    private array $failedDrivers = [];
+
     public function __construct(
         private readonly ConfigContract $config,
         private readonly ?Container $container = null,
@@ -42,6 +49,16 @@ final class TransportFactory
     public function extend(string $type, \Closure $resolver): void
     {
         $this->drivers[$type] = $resolver;
+    }
+
+    /**
+     * Register a custom failed job sender resolver.
+     *
+     * @param \Closure(array $failedConfig): SenderInterface $resolver
+     */
+    public function extendFailed(string $driver, \Closure $resolver): void
+    {
+        $this->failedDrivers[$driver] = $resolver;
     }
 
     /**
@@ -80,6 +97,41 @@ final class TransportFactory
     public function createSender(string $queue = 'default'): TransportInterface
     {
         return $this->getQueueTransport($queue);
+    }
+
+    /**
+     * Flush all keys for a given queue (ready, processing, delayed).
+     */
+    public function flushQueue(string $queue): void
+    {
+        $redisConfig = $this->config->get('thrun.redis', []);
+        $connection = new RedisConnection(
+            $this->createRedisClient(),
+            $redisConfig['prefix'] ?? 'thrun:queue',
+        );
+        $connection->purge($queue);
+    }
+
+    /**
+     * Build the failed job sender based on global config.
+     */
+    public function createFailedJobSender(): FailedJobStoreInterface
+    {
+        $failedConfig = $this->config->get('thrun.failed', []);
+        $driver = $failedConfig['driver'] ?? 'null';
+
+        if (isset($this->failedDrivers[$driver])) {
+            return ($this->failedDrivers[$driver])($failedConfig);
+        }
+
+        return match ($driver) {
+            'redis' => new RedisFailedJobSender(
+                redis: $this->createRedisClient(),
+                serializer: new JsonSerializer(new ClassMapMessageTypeResolver()),
+                prefix: $failedConfig['redis']['prefix'] ?? 'thrun:failed',
+            ),
+            default => new NullFailedJobSender(),
+        };
     }
 
     private function getQueueTransport(string $name): TransportInterface
@@ -134,7 +186,7 @@ final class TransportFactory
         };
     }
 
-    private function createRedisTransport(string $queue): RedisTransport
+    private function createRedisClient(): \Redis
     {
         $redisConfig = $this->config->get('thrun.redis', []);
 
@@ -152,8 +204,15 @@ final class TransportFactory
             $redisConfig['timeout'] ?? 1.0,
         );
 
+        return $redis;
+    }
+
+    private function createRedisTransport(string $queue): RedisTransport
+    {
+        $redisConfig = $this->config->get('thrun.redis', []);
+
         $connection = new RedisConnection(
-            $redis,
+            $this->createRedisClient(),
             $redisConfig['prefix'] ?? 'thrun:queue',
         );
 

@@ -64,7 +64,6 @@ Each queue is a separate transport. Currently supported: `redis` and `memory`.
 'queues' => [
     'emails'        => ['transport' => 'redis'],
     'notifications' => ['transport' => 'redis'],
-    'failed'        => ['transport' => 'redis'],
 ],
 ```
 
@@ -81,9 +80,36 @@ Each supervisor is an isolated worker group with its own queues, strategy, and p
         'strategy'  => ['class' => PriorityStrategy::class, 'priorities' => ['emails' => 3, 'notifications' => 1]],
         'policy'    => ['enabled' => false, 'class' => MaxConcurrencyPolicy::class, 'options' => ['max_per_partition' => 5]],
         'handlers'  => [],              // manual routing
-        'failure_transport' => 'failed', // queue for failed messages
     ],
 ],
+```
+
+### Failed Jobs
+
+When a message exhausts all retries, it is sent to the global failed job store (configured separately from supervisors):
+
+```php
+'failed' => [
+    'driver' => env('THRUN_FAILED_DRIVER', 'redis'),
+    'redis' => [
+        'prefix' => env('THRUN_FAILED_PREFIX', 'thrun:failed'),
+    ],
+],
+```
+
+Supported drivers: `redis` (default) and `null` (no-op).
+
+You can register custom failed job drivers:
+
+```php
+use Thrun\Laravel\Transport\TransportFactory;
+
+$factory = app(TransportFactory::class);
+$factory->extendFailed('database', function (array $config) {
+    return new DatabaseFailedJobSender(
+        table: $config['database']['table'] ?? 'thrun_failed_jobs',
+    );
+});
 ```
 
 ### Auto-discover
@@ -294,25 +320,52 @@ final class LogMiddleware implements WorkerMiddlewareInterface
 
 ---
 
-## Failure Transport
+## Failed Jobs & CLI
 
-When a message exhausts all retries, it is sent to the `failure_transport`.
+When a message exhausts all retries, it is persisted to the failed job store (configured in `config/thrun.php` under `failed`).
 
-```php
-'supervisors' => [
-    'default' => [
-        // ...
-        'failure_transport' => 'failed',
-    ],
-],
+### List failed jobs
+
+```bash
+php artisan thrun:failed
+php artisan thrun:failed --queue=emails
+php artisan thrun:failed --limit=100
 ```
 
-Make sure the `failed` queue is defined in `queues`:
+### Show details of a failed job
 
-```php
-'queues' => [
-    'failed' => ['transport' => 'redis'],
-],
+```bash
+php artisan thrun:failed:show 019e9c83-c3d7-7216-b37d-04b1c154a5c8
+```
+
+Shows: type, queue, exception, message, file, line, full trace, payload, stamps.
+
+### Retry a failed job
+
+```bash
+php artisan thrun:retry 019e9c83-c3d7-7216-b37d-04b1c154a5c8
+php artisan thrun:retry --all
+```
+
+Retry creates a **new** message with a fresh `JobIdStamp` but preserves `MessageIdStamp`.
+
+### Flush failed jobs
+
+```bash
+php artisan thrun:failed:flush
+```
+
+### Flush queues
+
+```bash
+# Flush a specific queue (ready, processing, delayed)
+php artisan thrun:flush emails
+
+# Flush all configured queues
+php artisan thrun:flush
+
+# Flush queues + failed jobs
+php artisan thrun:flush --failed
 ```
 
 ---
