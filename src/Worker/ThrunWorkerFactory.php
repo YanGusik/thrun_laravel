@@ -58,10 +58,7 @@ final readonly class ThrunWorkerFactory
             policyConfig: $supervisorConfig['policy'] ?? [],
         );
 
-        $failureTransport = null;
-        if (!empty($supervisorConfig['failure_transport'])) {
-            $failureTransport = $this->transportFactory->createSender($supervisorConfig['failure_transport']);
-        }
+        $failureTransport = $this->transportFactory->createFailedJobSender();
 
         return new Worker(
             transport: $receiver,
