@@ -266,6 +266,12 @@ $bus->dispatch(new SendEmailJob('user@test.com', 'Hello'));
 
 // or override:
 $bus->dispatch(new SendEmailJob('user@test.com', 'Hello'), 'urgent-emails');
+
+// Any service can push jobs into `memory` queues directly over the RPC socket.
+$bus->dispatchViaRpc(
+    new Envelope(message: ['user_id' => 42], routeKey: 'user.created'),
+    'realtime',
+);
 ```
 
 > **Important:** the constructor accepts **scalar data only** (`int`, `string`, `array`, etc.) — these values get serialized to Redis. Never inject services or objects into the constructor. All services are injected via DI in `__invoke()` — Laravel `Container::call()` resolves them automatically.
@@ -335,20 +341,6 @@ final class ProcessOrderHandler
         $ack->ack();
     }
 }
-```
-
-## Job Dispatch for memory
-
-Any service can push jobs into `memory` queues directly over the RPC socket.
-
-```php
-use Thrun\Laravel\Bus\ThrunMessageBus;
-use Thrun\Envelope\Envelope;
-
-$bus->dispatchViaRpc(
-    new Envelope(message: ['user_id' => 42], routeKey: 'user.created'),
-    'realtime',
-);
 ```
 
 ### Registering a listener
