@@ -63,9 +63,34 @@ Each queue is a separate transport. Currently supported: `redis` and `memory`.
 ```php
 'queues' => [
     'emails'        => ['transport' => 'redis'],
-    'notifications' => ['transport' => 'redis'],
+    'notifications' => ['transport' => 'memory'],
 ],
 ```
+
+`memory` transport holds jobs in process memory with no external dependencies.
+Primarily useful for local development and testing when you don't want to run Redis.
+
+All `memory` queues are automatically exposed on the RPC server —
+external processes can push jobs into them over a socket.
+
+> **Note:** `memory` queues are designed for up to `queue_size` jobs in flight.
+> Sending significantly more jobs than `queue_size` allows provides no delivery
+> guarantees. Use `redis` for workloads that require guaranteed delivery.
+
+### Worker configuration
+
+```php
+'worker' => [
+    'threads'     => env('THRUN_WORKER_THREADS', 2),
+    'concurrency' => env('THRUN_WORKER_CONCURRENCY', 100),
+    'queue_size'  => env('THRUN_WORKER_QUEUE_SIZE', 1000),
+],
+```
+
+- `threads` — number of OS threads. For I/O-bound workloads `1` is enough; increase for CPU-bound tasks.
+- `concurrency` — number of coroutines per thread.
+- `queue_size` — internal job buffer size. For `redis` queues this is a soft throughput limiter — Redis keeps the rest. For `memory` queues the buffer is the only storage, so tune this to match your expected peak load.
+
 
 ### Supervisors
 
@@ -75,12 +100,26 @@ Each supervisor is an isolated worker group with its own queues, strategy, and p
 'supervisors' => [
     'default' => [
         'queues'    => ['emails', 'notifications'],
-        'worker'    => ['threads' => 2, 'concurrency' => 100],
+        'worker'    => ['threads' => 2, 'concurrency' => 100, 'queue_size' => 1000],
         'supervisor'=> ['max_crashes' => 3, 'restart_window' => 300, 'restart_backoff' => 1.0],
         'strategy'  => ['class' => PriorityStrategy::class, 'priorities' => ['emails' => 3, 'notifications' => 1]],
         'policy'    => ['enabled' => false, 'class' => MaxConcurrencyPolicy::class, 'options' => ['max_per_partition' => 5]],
         'handlers'  => [],              // manual routing
     ],
+],
+```
+
+### RPC Server
+
+The RPC server runs alongside the worker and enables cross-process job dispatch and event broadcasting.
+
+```php
+'rpc' => [
+    'enabled'     => env('THRUN_RPC_ENABLED', true),
+    'transport'   => env('THRUN_RPC_TRANSPORT', 'unix'), // unix | tcp
+    'socket_path' => env('THRUN_RPC_SOCKET', '/tmp/thrun_rpc.sock'),
+    'host'        => env('THRUN_RPC_HOST', '127.0.0.1'),
+    'port'        => (int) env('THRUN_RPC_PORT', 9000),
 ],
 ```
 
@@ -118,6 +157,7 @@ $factory->extendFailed('database', function (array $config) {
 'auto_discover' => [
     'App\\Handlers',   // regular Handler classes
     'App\\Jobs',       // self-handling Job classes
+    'App\\Events',     // event listeners
 ],
 ```
 
@@ -234,14 +274,15 @@ $bus->dispatch(new SendEmailJob('user@test.com', 'Hello'), 'urgent-emails');
 
 ## Attributes
 
-| Attribute | Purpose | Applies to |
-|---|---|---|
-| `#[ThrunJob]` | Self-handling job marker | Job |
-| `#[Queue('emails')]` | Default queue for the message | Job / Message |
-| `#[Retry(backoff: [...], maxAttempts: 3)]` | Retry policy | Job / Message |
-| `#[Delay(5000)]` | Delay in ms | Job / Message |
-| `#[Timeout(30000)]` | Hard execution timeout | Job / Message |
-| `#[AsThrunHandler(messageClass: ...)]` | Explicit Handler → Message binding | Handler |
+| Attribute                                  | Purpose                            | Applies to     |
+|--------------------------------------------|------------------------------------|----------------|
+| `#[ThrunJob]`                              | Self-handling job marker           | Job            |
+| `#[Queue('emails')]`                       | Default queue for the message      | Job / Message  |
+| `#[Retry(backoff: [...], maxAttempts: 3)]` | Retry policy                       | Job / Message  |
+| `#[Delay(5000)]`                           | Delay in ms                        | Job / Message  |
+| `#[Timeout(30000)]`                        | Hard execution timeout             | Job / Message  |
+| `#[AsThrunHandler(messageClass: ...)]`     | Explicit Handler → Message binding | Handler        |
+| `#[ThrunEventListener('order.completed')]` | Event listener binding             | Event Listener |
 
 **Dispatch priority:**
 1. `dispatch()` argument (explicit)
@@ -262,21 +303,123 @@ public function __invoke(MyMessage $message, Acknowledger $ack): void
     // $ack->nack(); // reject (goes to retry or failure transport)
 }
 ```
+or auto Ack
+```php
+public function __invoke(MyMessage $message): void
+{
+    // ... logic ...
+}
+```
 
 > **Recommendation:** always accept `Acknowledger $ack` explicitly and call `$ack->ack()`. This gives you full control over the message lifecycle.
 
 ---
 
+## Events
+
+Thrun provides a lightweight pub/sub event system over the RPC socket. Events are **ephemeral** (fire-and-forget, no persistence) — use jobs for guaranteed delivery.
+
+### Emitting an event from a handler
+
+```php
+use Thrun\Laravel\Rpc\RpcPublisher;
+
+final class ProcessOrderHandler
+{
+    public function __construct(private RpcPublisher $rpc) {}
+
+    public function __invoke(ProcessOrderMessage $message, Acknowledger $ack): void
+    {
+        // ... business logic ...
+        $this->rpc->emit('order.completed', ['order_id' => $message->orderId]);
+        $ack->ack();
+    }
+}
+```
+
+### Registering a listener
+
+```php
+namespace App\Events;
+
+use Thrun\Laravel\Event\Attribute\ThrunEventListener;
+
+#[ThrunEventListener('order.completed')]
+final class OrderCompletedListener
+{
+    public function __construct(private readonly MailService $mail) {}
+
+    public function __invoke(array $payload): void
+    {
+        $this->mail->sendConfirmation($payload['order_id']);
+    }
+}
+
+```
+Wildcard subscriptions:
+
+```php
+#[ThrunEventListener('*')]                // all events
+#[ThrunEventListener('payment.*')]        // all payment.* events
+#[ThrunEventListener]                     // uses class name as identifier (PHP-only)
+```
+
+### Running the listener process
+
+```bash
+php artisan thrun:event
+
+# subscribe to specific patterns
+php artisan thrun:event --subscribe=order.completed --subscribe=payment.*
+```
+
+### Emitting from another language (Go example)
+
+```go
+payload := map[string]any{
+    "event": "order.completed",
+    "data":  map[string]any{"order_id": 123},
+}
+body, _ := json.Marshal(payload)
+
+// FrameType::Event = 0x02
+frame := make([]byte, 5+len(body))
+binary.BigEndian.PutUint32(frame[:4], uint32(len(body)))
+frame[4] = 0x02
+copy(frame[5:], body)
+conn.Write(frame)
+```
+
+---
+
+## Wire Protocol
+
+All RPC communication uses a simple length-prefixed binary framing:
+[4 bytes BE uint32 — payload length\][1 byte — frame type\][N bytes — JSON payload\]
+
+| Type        | Byte   | Direction       | Purpose                                   |
+|-------------|--------|-----------------|-------------------------------------------|
+| `Job`       | `0x01` | client → server | Push job into a local memory queue        |
+| `Event`     | `0x02` | client → server | Broadcast event to subscribers            |
+| `Subscribe` | `0x03` | client → server | Register interest in an event name/pattern |
+| `RpcRequest` | `0x04` | client → server | Synchronous call, expects `RpcReply`      |
+| `RpcReply`  | `0x05` | server → client | Response to `RpcRequest`                  |
+| `Error`     | `0x06` | server → client | Error response                            |
+
+---
+
+
+
+---
+
 ## Auto-discover
 
-Class scanning happens automatically for namespaces listed in `auto_discover`.
-
-### Handlers
-- `#[AsThrunHandler]` — explicit binding to `messageClass`
-- Naming convention: `SendEmailHandler` → `SendEmailMessage`
-
-### Self-handling Jobs
-- `#[ThrunJob]` on an invokable class — the class registers as its own handler
+| Convention | Result |
+|---|---|
+| `#[AsThrunHandler]` on handler class | Explicit binding to `messageClass` |
+| `SendEmailHandler` → `SendEmailMessage` | Naming convention auto-wire |
+| `#[ThrunJob]` on invokable class | Class registers as its own handler |
+| `#[ThrunEventListener('event.name')]` | Binds listener to event name/pattern |
 
 ---
 
@@ -373,15 +516,33 @@ php artisan thrun:flush --failed
 ## Running the Worker
 
 ```bash
-# All supervisors
-php artisan thrun:work
-
-# Single supervisor
-php artisan thrun:work --supervisor=default
-
-# With stats
-php artisan thrun:work --stats
+php artisan thrun:work                    # all supervisors + RPC server
+php artisan thrun:work --supervisor=X     # single supervisor
+php artisan thrun:work --stats            # with real-time throughput stats
+php artisan thrun:work --no-rpc           # without RPC server
 ```
+
+---
+
+---
+
+## Commands Reference
+
+| Command | Description |
+|---|---|
+| `thrun:work` | Start all supervisors + RPC server |
+| `thrun:work --supervisor=X` | Start a single supervisor + RPC server |
+| `thrun:work --stats` | Real-time throughput stats |
+| `thrun:work --no-rpc` | Disable RPC server for this process |
+| `thrun:event` | Listen and dispatch incoming events |
+| `thrun:event --subscribe=X` | Subscribe to specific pattern |
+| `thrun:failed` | List failed jobs |
+| `thrun:failed:show {id}` | Show details of a failed job |
+| `thrun:retry {id}` | Retry a specific failed job |
+| `thrun:retry --all` | Retry all failed jobs |
+| `thrun:failed:flush` | Delete all failed jobs |
+| `thrun:flush {queue?}` | Flush queue(s) |
+| `thrun:flush --failed` | Flush queues + failed jobs |
 
 ---
 

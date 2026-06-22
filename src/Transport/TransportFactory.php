@@ -134,7 +134,7 @@ final class TransportFactory
         };
     }
 
-    private function getQueueTransport(string $name): TransportInterface
+    public function getQueueTransport(string $name): TransportInterface
     {
         if (isset($this->transports[$name])) {
             return $this->transports[$name];
@@ -154,7 +154,7 @@ final class TransportFactory
     /**
      * @param array<string, mixed> $queueConfig
      */
-    private function buildQueueTransport(string $name, array $queueConfig): TransportInterface
+    public function buildQueueTransport(string $name, array $queueConfig): TransportInterface
     {
         $type = $queueConfig['transport'] ?? 'redis';
 
@@ -226,7 +226,7 @@ final class TransportFactory
     /**
      * @param array<string, TransportInterface> $receivers
      */
-    private function wrapMultiQueue(array $receivers, array $strategyConfig): MultiQueueReceiver
+    public function wrapMultiQueue(array $receivers, array $strategyConfig): MultiQueueReceiver
     {
         $strategyClass = $strategyConfig['class'] ?? PriorityStrategy::class;
         $priorities = $strategyConfig['priorities'] ?? [];
@@ -244,7 +244,7 @@ final class TransportFactory
         );
     }
 
-    private function wrapPolicy(ReceiverInterface $inner, array $policyConfig): PolicyAwareReceiver
+    public function wrapPolicy(ReceiverInterface $inner, array $policyConfig): PolicyAwareReceiver
     {
         $policyClass = $policyConfig['class'] ?? ChainPolicy::class;
         $options = $policyConfig['options'] ?? [];

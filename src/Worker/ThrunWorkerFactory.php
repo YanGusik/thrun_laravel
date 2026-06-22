@@ -34,18 +34,19 @@ final readonly class ThrunWorkerFactory
         ?\Closure $onResult = null,
     ): Worker {
         $supervisorConfig = $this->getSupervisor($supervisor);
-        $handlers = $this->resolveHandlers($supervisorConfig);
+        $handlers         = $this->resolveHandlers($supervisorConfig);
 
         if ($handlers === []) {
             throw new \RuntimeException(
-                "No message handlers registered for supervisor \"{$supervisor}\". " .
+                "No message handlers registered for supervisor \"{$supervisor}\". ".
                 'Check config/thrun.php supervisors.*.handlers or auto_discover namespaces.'
             );
         }
 
         $workerConfig = $supervisorConfig['worker'] ?? [];
-        $threads = $workerConfig['threads'] ?? 4;
-        $concurrency = $workerConfig['concurrency'] ?? 10;
+        $threads      = $workerConfig['threads'] ?? 4;
+        $concurrency  = $workerConfig['concurrency'] ?? 10;
+        $queueSize    = $workerConfig['queue_size'] ?? 1000;
 
         $resolvedMiddleware = array_merge(
             $this->resolveMiddleware($supervisorConfig['middleware'] ?? []),
@@ -66,6 +67,7 @@ final readonly class ThrunWorkerFactory
             options: new WorkerOptions(
                 threads: $threads,
                 concurrency: $concurrency,
+                queueSize: $queueSize,
                 bootloader: $this->createBootloader(),
                 middleware: $resolvedMiddleware,
                 onDispatch: $onDispatch,
@@ -84,7 +86,7 @@ final readonly class ThrunWorkerFactory
         ?\Closure $onResult = null,
     ): Supervisor {
         $supervisorConfig = $this->getSupervisor($supervisor);
-        $config = $supervisorConfig['supervisor'] ?? [];
+        $config           = $supervisorConfig['supervisor'] ?? [];
 
         return new Supervisor(
             workerFactory: fn() => $this->createWorker($supervisor, $metrics, $middleware, $onDispatch, $onResult),
@@ -97,7 +99,7 @@ final readonly class ThrunWorkerFactory
     }
 
     /**
-     * @param array<string, mixed> $supervisorConfig
+     * @param  array<string, mixed>  $supervisorConfig
      * @return array<string, callable(object|array, ?Acknowledger): void>
      */
     private function resolveHandlers(array $supervisorConfig): array
@@ -124,17 +126,17 @@ final readonly class ThrunWorkerFactory
      */
     private function discoverNamespace(string $namespace): array
     {
-        $handlers = [];
+        $handlers      = [];
         $handlerSuffix = 'Handler';
         $messageSuffix = 'Message';
 
-        $dirPath = str_replace('\\', '/', $namespace);
-        $dirPath = preg_replace('#^App/#', 'app/', $dirPath);
-        $directory = $this->container->basePath() . '/' . $dirPath;
+        $dirPath   = str_replace('\\', '/', $namespace);
+        $dirPath   = preg_replace('#^App/#', 'app/', $dirPath);
+        $directory = $this->container->basePath().'/'.$dirPath;
 
         if (is_dir($directory)) {
-            $handlerFiles = glob($directory . '/*' . $handlerSuffix . '.php');
-            $jobFiles = glob($directory . '/*Job.php');
+            $handlerFiles = glob($directory.'/*'.$handlerSuffix.'.php');
+            $jobFiles     = glob($directory.'/*Job.php');
             foreach (array_merge($handlerFiles, $jobFiles) as $file) {
                 require_once $file;
             }
@@ -172,8 +174,8 @@ final readonly class ThrunWorkerFactory
                 continue;
             }
 
-            $baseName = substr($class, 0, -strlen($handlerSuffix));
-            $possibleMessage = str_replace('\\Handlers\\', '\\Messages\\', $baseName) . $messageSuffix;
+            $baseName        = substr($class, 0, -strlen($handlerSuffix));
+            $possibleMessage = str_replace('\\Handlers\\', '\\Messages\\', $baseName).$messageSuffix;
             if (class_exists($possibleMessage)) {
                 $handlers[$possibleMessage] = $this->resolveHandler($class);
             }
@@ -183,7 +185,7 @@ final readonly class ThrunWorkerFactory
     }
 
     /**
-     * @param class-string|\Closure $handler
+     * @param  class-string|\Closure  $handler
      * @return callable(object|array, ?Acknowledger): void
      */
     private function resolveHandler(string|\Closure $handler): \Closure
@@ -211,7 +213,7 @@ final readonly class ThrunWorkerFactory
     }
 
     /**
-     * @param class-string $jobClass
+     * @param  class-string  $jobClass
      * @return callable(object|array, ?Acknowledger): void
      */
     private function resolveSelfHandler(string $jobClass): \Closure
@@ -240,7 +242,7 @@ final readonly class ThrunWorkerFactory
     }
 
     /**
-     * @param list<class-string|object> $middleware
+     * @param  list<class-string|object>  $middleware
      * @return list<object>
      */
     private function resolveMiddleware(array $middleware): array
@@ -253,13 +255,14 @@ final readonly class ThrunWorkerFactory
                 $resolved[] = $item;
             }
         }
+
         return $resolved;
     }
 
     private function createBootloader(): \Closure
     {
         $basePath = $this->container->basePath();
-        $autoload = $basePath . '/vendor/autoload.php';
+        $autoload = $basePath.'/vendor/autoload.php';
 
         if (!file_exists($autoload)) {
             throw new \RuntimeException("Cannot find Laravel autoloader at {$autoload}");
@@ -268,7 +271,7 @@ final readonly class ThrunWorkerFactory
         return static function () use ($autoload, $basePath): void {
             require_once $autoload;
 
-            $app = require $basePath . '/bootstrap/app.php';
+            $app = require $basePath.'/bootstrap/app.php';
             $app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
         };
     }

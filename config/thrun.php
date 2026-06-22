@@ -37,6 +37,7 @@ return [
             'worker' => [
                 'threads'     => (int) env('THRUN_WORKER_THREADS', 2),
                 'concurrency' => (int) env('THRUN_WORKER_CONCURRENCY', 100),
+                'queue_size'  => (int) env('THRUN_WORKER_QUEUE_SIZE', 1000),
             ],
 
             'supervisor' => [
@@ -81,6 +82,7 @@ return [
             'worker' => [
                 'threads'     => 1,
                 'concurrency' => 100,
+                'query_size'  => 1000,
             ],
 
             'supervisor' => [
@@ -108,9 +110,17 @@ return [
         ],
     ],
 
+    'rpc' => [
+        'enabled'     => env('THRUN_RPC_ENABLED', true),
+        'transport'   => env('THRUN_RPC_TRANSPORT', 'unix'), // unix|tcp
+        'socket_path' => env('THRUN_RPC_SOCKET', sys_get_temp_dir().'/thrun_rpc.sock'),
+        'host'        => env('THRUN_RPC_HOST', '127.0.0.1'),
+        'port'        => (int) env('THRUN_RPC_PORT', 9000),
+    ],
+
     'failed' => [
         'driver' => env('THRUN_FAILED_DRIVER', 'redis'),
-        'redis' => [
+        'redis'  => [
             'prefix' => env('THRUN_FAILED_PREFIX', 'thrun:failed'),
         ],
     ],
@@ -118,5 +128,6 @@ return [
     'auto_discover' => [
         'App\\Handlers',
         'App\\Jobs',
+        'App\\Events',
     ],
 ];

@@ -14,11 +14,12 @@ use Thrun\Laravel\Handler\Attribute\Delay;
 use Thrun\Laravel\Handler\Attribute\Queue;
 use Thrun\Laravel\Handler\Attribute\Retry;
 use Thrun\Laravel\Handler\Attribute\Timeout;
+use Thrun\Laravel\Rpc\RpcPublisher;
 use Thrun\Laravel\Transport\TransportFactory;
 
-final class ThrunMessageBus
+final readonly class ThrunMessageBus
 {
-    public function __construct(private readonly TransportFactory $transportFactory)
+    public function __construct(private TransportFactory $transportFactory, private RpcPublisher $rpcPublisher)
     {
     }
 
@@ -65,15 +66,20 @@ final class ThrunMessageBus
         $transport->send(Envelope::wrap($message, ...$stamps));
     }
 
-    public function builder(): DispatchBuilder
+    public function dispatchViaRpc(Envelope $envelope, string $queue): void
     {
-        return new DispatchBuilder($this);
+        $this->rpcPublisher->job($queue, $envelope);
     }
 
     public function dispatchCustom(Envelope $envelope, string $queue = 'default'): void
     {
         $transport = $this->transportFactory->createSender($queue);
         $transport->send($envelope);
+    }
+
+    public function builder(): DispatchBuilder
+    {
+        return new DispatchBuilder($this);
     }
 
     /**
