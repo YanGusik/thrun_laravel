@@ -337,6 +337,20 @@ final class ProcessOrderHandler
 }
 ```
 
+## Job Dispatch for memory
+
+Any service can push jobs into `memory` queues directly over the RPC socket.
+
+```php
+use Thrun\Laravel\Bus\ThrunMessageBus;
+use Thrun\Envelope\Envelope;
+
+$bus->dispatchViaRpc(
+    new Envelope(message: ['user_id' => 42], routeKey: 'user.created'),
+    'realtime',
+);
+```
+
 ### Registering a listener
 
 ```php
