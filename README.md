@@ -76,6 +76,7 @@ external processes can push jobs into them over a socket.
 > **Note:** `memory` queues are designed for up to `queue_size` jobs in flight.
 > Sending significantly more jobs than `queue_size` allows provides no delivery
 > guarantees. Use `redis` for workloads that require guaranteed delivery.
+
 > FOR MEMORY USE: `$bus->dispatchViaRpc();`
 
 ### Worker configuration
