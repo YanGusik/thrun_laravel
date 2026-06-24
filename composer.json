@@ -8,9 +8,9 @@
         "ext-pcntl": "*",
         "ext-redis": "*",
         "yangusik/thrun": "*",
-        "illuminate/console": "^11.0 || ^13.0",
-        "illuminate/container": "^11.0 || ^13.0",
-        "illuminate/support": "^11.0 || ^13.0"
+        "illuminate/console": "^11.0 || ^12.0 || ^13.0",
+        "illuminate/container": "^11.0 || ^12.0 || ^13.0",
+        "illuminate/support": "^11.0 || ^12.0 || ^13.0"
     },
     "autoload": {
         "psr-4": {
