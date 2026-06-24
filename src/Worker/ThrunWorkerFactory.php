@@ -6,6 +6,7 @@ namespace Thrun\Laravel\Worker;
 
 use Illuminate\Contracts\Config\Repository as ConfigContract;
 use Illuminate\Contracts\Container\Container;
+use ReflectionException;
 use Thrun\Laravel\Handler\AsThrunHandler;
 use Thrun\Laravel\Handler\Attribute\ThrunJob;
 use Thrun\Laravel\Transport\TransportFactory;
@@ -123,6 +124,7 @@ final readonly class ThrunWorkerFactory
      * Auto-discover handlers and self-handling jobs in the given namespace.
      *
      * @return array<string, callable(object|array, ?Acknowledger): void>
+     * @throws ReflectionException
      */
     private function discoverNamespace(string $namespace): array
     {

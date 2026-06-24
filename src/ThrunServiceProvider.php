@@ -15,7 +15,6 @@ use Thrun\Laravel\Console\ThrunRetryCommand;
 use Thrun\Laravel\Console\ThrunWorkCommand;
 use Thrun\Laravel\Event\EventListener;
 use Thrun\Laravel\Event\EventListenerRegistry;
-use Thrun\Laravel\Handler\HandlerRegistry;
 use Thrun\Laravel\Rpc\RpcAddress;
 use Thrun\Laravel\Rpc\RpcPublisher;
 use Thrun\Laravel\Rpc\RpcServerFactory;
@@ -32,22 +31,6 @@ final class ThrunServiceProvider extends ServiceProvider
 
         $this->app->singleton(TransportFactory::class, function ($app) {
             return new TransportFactory($app['config'], $app);
-        });
-
-        $this->app->singleton(HandlerRegistry::class, function ($app) {
-            $registry = new HandlerRegistry();
-
-            $globalHandlers = $app['config']->get('thrun.handlers', []);
-            foreach ($globalHandlers as $messageClass => $handler) {
-                $registry->register($messageClass, $handler);
-            }
-
-            $autoDiscover = $app['config']->get('thrun.auto_discover', []);
-            if ($autoDiscover !== []) {
-                $registry->discover($autoDiscover);
-            }
-
-            return $registry;
         });
 
         $this->app->singleton(ThrunWorkerFactory::class, function ($app) {
