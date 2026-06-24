@@ -305,13 +305,6 @@ public function __invoke(MyMessage $message, Acknowledger $ack): void
     // $ack->nack(); // reject (goes to retry or failure transport)
 }
 ```
-or auto Ack
-```php
-public function __invoke(MyMessage $message): void
-{
-    // ... logic ...
-}
-```
 
 > **Recommendation:** always accept `Acknowledger $ack` explicitly and call `$ack->ack()`. This gives you full control over the message lifecycle.
 

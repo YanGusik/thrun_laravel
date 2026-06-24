@@ -186,7 +186,7 @@ final readonly class ThrunWorkerFactory
 
     /**
      * @param  class-string|\Closure  $handler
-     * @return callable(object|array, ?Acknowledger): void
+     * @return callable(object|array, Acknowledger): void
      */
     private function resolveHandler(string|\Closure $handler): \Closure
     {
@@ -194,7 +194,7 @@ final readonly class ThrunWorkerFactory
             return $handler;
         }
 
-        return static function (object|array $message, ?Acknowledger $ack = null) use ($handler): void {
+        return static function (object|array $message, Acknowledger $ack) use ($handler): void {
             $instance = \Illuminate\Container\Container::getInstance()->make($handler);
 
             if (!is_callable($instance)) {
@@ -204,17 +204,13 @@ final readonly class ThrunWorkerFactory
                 ));
             }
 
-            if ($ack !== null) {
-                $instance($message, $ack);
-            } else {
-                $instance($message);
-            }
+            $instance($message, $ack);
         };
     }
 
     /**
      * @param  class-string  $jobClass
-     * @return callable(object|array, ?Acknowledger): void
+     * @return callable(object|array, Acknowledger): void
      */
     private function resolveSelfHandler(string $jobClass): \Closure
     {
