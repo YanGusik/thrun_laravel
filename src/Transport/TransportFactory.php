@@ -197,12 +197,14 @@ final class TransportFactory
                 'max'     => 1,
                 'mux'     => 0,
             ],
+            'host' => $redisConfig['host'] ?? '127.0.0.1',
+            'port' => $redisConfig['port'] ?? 6379,
         ]);
-        $redis->connect(
-            $redisConfig['host'] ?? '127.0.0.1',
-            (int) ($redisConfig['port'] ?? 6379),
-            $redisConfig['timeout'] ?? 1.0,
-        );
+//        $redis->connect(
+//            $redisConfig['host'] ?? '127.0.0.1',
+//            (int) ($redisConfig['port'] ?? 6379),
+//            $redisConfig['timeout'] ?? 1.0,
+//        );
 
         return $redis;
     }
