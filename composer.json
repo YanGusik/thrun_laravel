@@ -17,6 +17,13 @@
             "Thrun\\Laravel\\": "src/"
         }
     },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Thrun\\Laravel\\ThrunServiceProvider"
+            ]
+        }
+    },
     "minimum-stability": "dev",
     "prefer-stable": true
 }
