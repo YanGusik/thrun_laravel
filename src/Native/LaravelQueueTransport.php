@@ -44,7 +44,6 @@ final class LaravelQueueTransport implements TransportInterface
         private readonly int $sleepMs,
         private readonly ProducerGate $gate,
         private readonly ExceptionHandler $exceptions,
-        private readonly InFlightJobs $inFlight = new InFlightJobs(),
         private readonly array $workerSettings = ['tries' => 1, 'timeout' => 60, 'backoff' => 0],
     ) {
     }
@@ -129,24 +128,29 @@ final class LaravelQueueTransport implements TransportInterface
 
             $this->gate->jobReserved();
 
-            // Counted here, not on thrun's dispatch callback: that callback runs
-            // after submit(), which suspends when the pool is full, so a fast job
-            // can report its result before the dispatch is recorded.
-            $this->inFlight->dispatched();
+            $reserved = ReservedJob::fromRedisJob($job, $this->connectionName, $name);
 
             // The timeout is thrun's own: it already runs each task under a
             // cancellation token, so the adapter does not build a second one.
             return new Envelope(
-                [
-                    'job' => ReservedJob::fromRedisJob($job, $this->connectionName, $name)->toArray(),
-                    'options' => $this->workerSettings,
-                ],
+                ['job' => $reserved->toArray(), 'options' => $this->workerSettings],
                 type: self::ROUTE,
-                stamps: [new TimeoutStamp($this->workerSettings['timeout'] * 1000)],
+                stamps: [new TimeoutStamp($this->timeoutFor($job) * 1000)],
             );
         }
 
         return null;
+    }
+
+    /**
+     * Seconds this job may run: its own `$timeout` when it declares one, the
+     * run's setting otherwise — the precedence `queue:work` applies.
+     */
+    private function timeoutFor(RedisJob $job): int
+    {
+        $declared = $job->payload()['timeout'] ?? null;
+
+        return $declared === null ? $this->workerSettings['timeout'] : (int) $declared;
     }
 
     /** True once receive() has returned null for good: no more envelopes follow. */

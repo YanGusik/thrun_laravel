@@ -183,10 +183,13 @@ php artisan thrun:work-native --queue=high,default
 ],
 ```
 
-**Coming from Horizon?** If `config/horizon.php` is present, the supervisor for
-this connection supplies the defaults — its `queue`, `tries`, `timeout`,
-`maxTime` and `maxJobs` — so the settings the application already runs on are not
-restated on the command line. An explicit option always wins.
+**Coming from Horizon?** If `config/horizon.php` is present, the supervisors for
+this connection supply the defaults — every one of their queues, plus `tries`,
+`timeout`, `maxTime` and `maxJobs` — so the settings the application already runs
+on are not restated on the command line. An explicit option always wins. Where
+Horizon runs several supervisors on one connection with different retries, one
+worker cannot: the queues are all served, the numbers come from the first
+supervisor, and the command says so at startup.
 
 Requires `yangusik/laravel-spawn`, `bootstrap/app.php` pointed at its
 `AsyncApplication`, and a **redis** queue connection. All three are checked at
@@ -224,6 +227,10 @@ failed once with `TimeoutExceededException`.
   going, so run behind something that restarts on failure and watch your logs.
 - `timeout` must stay below `retry_after`, the same rule `queue:work` has: a job
   that outlives its reservation gets reserved a second time.
+- `retry_after` must also exceed the time a worker thread needs to boot the
+  application — a second or two on a cold cache. Set below that, the first jobs
+  of a run can have their reservations expire while the threads are still
+  starting; with `--tries=1` such a job is then failed without ever running.
 
 See `tests/e2e/native/` for the end-to-end check and how to run it.
 

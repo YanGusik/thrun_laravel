@@ -13,7 +13,6 @@ use Illuminate\Queue\RedisQueue;
 use RuntimeException;
 use Spawn\Laravel\Foundation\AsyncApplication;
 use Thrun\Laravel\Native\HorizonSettings;
-use Thrun\Laravel\Native\InFlightJobs;
 use Thrun\Laravel\Native\LaravelQueueTransport;
 use Thrun\Laravel\Native\NativeJobHandler;
 use Thrun\Laravel\Native\ProducerGate;
@@ -58,12 +57,18 @@ final class ThrunNativeWorkCommand extends Command
 
         $this->assertRuntime($app, $connection);
 
-        // Horizon's own supervisor settings are the closest thing to what this
-        // application already runs; an explicit option still overrides them.
         $horizon = HorizonSettings::forConnection($config, $connection, $app->environment());
         $queues = $this->queueNames($horizon->queues ?: $config->get('thrun.native.queues', ['default']));
 
-        $inFlight = new InFlightJobs();
+        if ($horizon->supervisors > 1) {
+            // Horizon runs each supervisor with its own tries and timeout; one
+            // worker cannot, so the operator should know whose numbers these are.
+            $this->warn(sprintf(
+                '%d Horizon supervisors cover [%s]; using the first one\'s tries and timeout for all its queues.',
+                $horizon->supervisors,
+                $connection,
+            ));
+        }
 
         $gate = new ProducerGate(
             // `queue:restart` writes a timestamp here, and every worker started
@@ -83,7 +88,6 @@ final class ThrunNativeWorkCommand extends Command
             sleepMs: (int) ($this->optionOr('sleep', $config->get('thrun.native.sleep', 1.0)) * 1000),
             gate: $gate,
             exceptions: $app->make(ExceptionHandler::class),
-            inFlight: $inFlight,
             workerSettings: [
                 'tries' => (int) $this->settingOr('tries', $horizon->tries),
                 'timeout' => (int) $this->settingOr('timeout', $horizon->timeout),
@@ -102,10 +106,10 @@ final class ThrunNativeWorkCommand extends Command
             $concurrency,
         ));
 
-        $worker = $this->buildWorker($app, $transport, $inFlight, $threads, $concurrency);
+        $worker = $this->buildWorker($app, $transport, $threads, $concurrency);
 
         $this->stopOnSignals($transport);
-        $watcher = $this->stopWhenDrained($worker, $transport, $inFlight, (int) $this->option('shutdown-grace'));
+        $watcher = $this->stopWhenDrained($worker, $transport, $gate, (int) $this->option('shutdown-grace'));
 
         try {
             $worker->run();
@@ -122,7 +126,6 @@ final class ThrunNativeWorkCommand extends Command
     private function buildWorker(
         Application $app,
         LaravelQueueTransport $transport,
-        InFlightJobs $inFlight,
         int $threads,
         int $concurrency,
     ): Worker {
@@ -140,7 +143,6 @@ final class ThrunNativeWorkCommand extends Command
                     $app->basePath('vendor/autoload.php'),
                     $app->bootstrapPath('app.php'),
                 ),
-                onResult: $inFlight->completed(...),
             ),
         );
     }
@@ -150,36 +152,37 @@ final class ThrunNativeWorkCommand extends Command
      * back, waiting no longer than the grace period for the stragglers.
      *
      * thrun's result reader waits forever, so somebody has to call stop(), and
-     * only once the in-flight count is zero: a running job must finish and let
-     * Laravel release its reservation.
+     * only once the pool is idle: a running job must finish and let Laravel
+     * release its reservation. The pool's own counters are the source of truth —
+     * they stay right even when a thread dies without reporting.
      *
-     * The grace period bounds that wait. A thread can die without reporting a
-     * result — a job calling exit(), an OOM — and the count would never reach
-     * zero.
+     * The grace period bounds the wait for a job that never ends on its own.
      *
      * @return Scope the watcher's scope, to be cancelled once the run is over
      */
     private function stopWhenDrained(
         Worker $worker,
         LaravelQueueTransport $transport,
-        InFlightJobs $inFlight,
+        ProducerGate $gate,
         int $graceSeconds,
     ): Scope {
         $scope = new Scope();
 
-        $scope->spawn(function () use ($worker, $transport, $inFlight, $graceSeconds): void {
+        $scope->spawn(function () use ($worker, $transport, $gate, $graceSeconds): void {
             while (!$transport->isDrained()) {
                 delay(self::DRAIN_POLL_MS);
             }
 
             $deadline = microtime(true) + $graceSeconds;
 
-            while (!$inFlight->isEmpty() && microtime(true) < $deadline) {
+            // isIdle() also requires at least one completed task, so a run that
+            // reserved nothing would wait out the grace period for no reason.
+            while ($gate->reservedCount() > 0 && !$worker->isIdle() && microtime(true) < $deadline) {
                 delay(self::DRAIN_POLL_MS);
             }
 
-            if (!$inFlight->isEmpty()) {
-                $this->warn(sprintf('Gave up waiting for %d job(s) after %ds.', $inFlight->count(), $graceSeconds));
+            if ($gate->reservedCount() > 0 && !$worker->isIdle()) {
+                $this->warn(sprintf('Gave up waiting for running jobs after %ds.', $graceSeconds));
             }
 
             $worker->stop();
