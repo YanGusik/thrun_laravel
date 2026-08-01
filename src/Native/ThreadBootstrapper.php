@@ -65,9 +65,12 @@ final class ThreadBootstrapper
      */
     public static function prepare(Application $app): void
     {
-        TrueAsyncServer::initializeApp($app);
-
         if ($app instanceof AsyncApplication) {
+            // Only for an async application: initializeApp() also switches on the
+            // database and Redis pools, and those change behaviour for an
+            // application that has not opted into coroutine isolation.
+            TrueAsyncServer::initializeApp($app);
+
             // Laravel binds the log context as `scoped`, meaning "one per request"
             // — and its own listener rehydrates it on every JobProcessing event.
             // Left shared, two concurrent jobs on one thread overwrite each

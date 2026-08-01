@@ -191,12 +191,14 @@ Horizon runs several supervisors on one connection with different retries, one
 worker cannot: the queues are all served, the numbers come from the first
 supervisor, and the command says so at startup.
 
-Requires `yangusik/laravel-spawn`, `bootstrap/app.php` pointed at its
-`AsyncApplication`, and a **redis** queue connection. All three are checked at
-startup and refused with a clear message, because each of them fails silently
-otherwise: several coroutines share one thread, and laravel-spawn is what gives
-each of them its own container-scoped services, database connection and log
-context.
+Requires a **redis** queue connection, checked at startup.
+
+`yangusik/laravel-spawn` is optional and decides how many jobs may share a
+thread. With `bootstrap/app.php` pointed at its `AsyncApplication`, each
+coroutine gets its own container-scoped services, database connection and log
+context, and `concurrency` applies as configured. Without it there is nothing to
+keep concurrent jobs apart, so the command says so and runs one job per thread —
+parallelism then comes from `threads` alone.
 
 **How it works.** The main thread reserves jobs through Laravel's own
 `RedisQueue::pop()`, so the Lua scripts, the `:reserved` set and the `attempts`

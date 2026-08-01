@@ -56,6 +56,7 @@ final class ThrunNativeWorkCommand extends Command
         $connection = $this->option('connection') ?? $config->get('queue.default');
 
         $this->assertRuntime($app, $connection);
+        $concurrency = $this->safeConcurrency($app);
 
         $horizon = HorizonSettings::forConnection($config, $connection, $app->environment());
         $queues = $this->queueNames($horizon->queues ?: $config->get('thrun.native.queues', ['default']));
@@ -96,7 +97,6 @@ final class ThrunNativeWorkCommand extends Command
         );
 
         $threads = (int) $this->optionOr('threads', $config->get('thrun.native.threads', 4));
-        $concurrency = (int) $this->optionOr('concurrency', $config->get('thrun.native.concurrency', 10));
 
         $this->info(sprintf(
             'Working %s on connection [%s] with %d threads x %d jobs.',
@@ -215,6 +215,32 @@ final class ThrunNativeWorkCommand extends Command
     }
 
     /**
+     * Jobs per thread, lowered to one when nothing isolates them.
+     *
+     * Several coroutines in a thread share the container, the log context and
+     * the transaction counter. laravel-spawn's async mode gives each of them its
+     * own; without it the only safe number is one, and the operator hears why
+     * rather than discovering it as mixed-up data.
+     */
+    private function safeConcurrency(Application $app): int
+    {
+        $configured = (int) $this->optionOr('concurrency', $app->make('config')->get('thrun.native.concurrency', 10));
+
+        if ($configured <= 1 || $app instanceof AsyncApplication) {
+            return max(1, $configured);
+        }
+
+        $this->warn(sprintf(
+            'Running one job per thread instead of %d: concurrent jobs share one container '
+            . 'unless bootstrap/app.php builds a %s (see laravel-spawn).',
+            $configured,
+            AsyncApplication::class,
+        ));
+
+        return 1;
+    }
+
+    /**
      * @param list<string>|string $configured
      *
      * @return list<string>
@@ -261,16 +287,6 @@ final class ThrunNativeWorkCommand extends Command
     {
         if (!extension_loaded('true_async')) {
             throw new RuntimeException('thrun:work-native needs the TrueAsync build of PHP.');
-        }
-
-        if (!$app instanceof AsyncApplication) {
-            // Without async mode the per-coroutine isolation is off while the
-            // coroutines still run: they would share the container, the log
-            // context and the transaction counter.
-            throw new RuntimeException(
-                'thrun:work-native needs bootstrap/app.php to build a '
-                . AsyncApplication::class . '. See the laravel-spawn README.'
-            );
         }
 
         $queue = $app->make('queue')->connection($connection);
