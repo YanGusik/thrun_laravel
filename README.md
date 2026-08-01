@@ -183,6 +183,11 @@ php artisan thrun:work-native --queue=high,default
 ],
 ```
 
+**Coming from Horizon?** If `config/horizon.php` is present, the supervisor for
+this connection supplies the defaults — its `queue`, `tries`, `timeout`,
+`maxTime` and `maxJobs` — so the settings the application already runs on are not
+restated on the command line. An explicit option always wins.
+
 Requires `yangusik/laravel-spawn`, `bootstrap/app.php` pointed at its
 `AsyncApplication`, and a **redis** queue connection. All three are checked at
 startup and refused with a clear message, because each of them fails silently

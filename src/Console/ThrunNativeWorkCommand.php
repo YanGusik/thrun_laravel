@@ -12,6 +12,7 @@ use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Queue\RedisQueue;
 use RuntimeException;
 use Spawn\Laravel\Foundation\AsyncApplication;
+use Thrun\Laravel\Native\HorizonSettings;
 use Thrun\Laravel\Native\InFlightJobs;
 use Thrun\Laravel\Native\LaravelQueueTransport;
 use Thrun\Laravel\Native\NativeJobHandler;
@@ -56,7 +57,11 @@ final class ThrunNativeWorkCommand extends Command
         $connection = $this->option('connection') ?? $config->get('queue.default');
 
         $this->assertRuntime($app, $connection);
-        $queues = $this->queueNames($config->get('thrun.native.queues', ['default']));
+
+        // Horizon's own supervisor settings are the closest thing to what this
+        // application already runs; an explicit option still overrides them.
+        $horizon = HorizonSettings::forConnection($config, $connection, $app->environment());
+        $queues = $this->queueNames($horizon->queues ?: $config->get('thrun.native.queues', ['default']));
 
         $inFlight = new InFlightJobs();
 
@@ -65,8 +70,8 @@ final class ThrunNativeWorkCommand extends Command
             // before it is expected to exit so the supervisor replaces it.
             restartSignal: fn() => $cache->get('illuminate:queue:restart'),
             isDownForMaintenance: fn() => $app->isDownForMaintenance(),
-            maxJobs: (int) $this->option('max-jobs'),
-            maxTime: (int) $this->option('max-time'),
+            maxJobs: (int) $this->settingOr('max-jobs', $horizon->maxJobs),
+            maxTime: (int) $this->settingOr('max-time', $horizon->maxTime),
             stopWhenEmpty: (bool) $this->option('stop-when-empty'),
             force: (bool) $this->option('force'),
         );
@@ -80,8 +85,8 @@ final class ThrunNativeWorkCommand extends Command
             exceptions: $app->make(ExceptionHandler::class),
             inFlight: $inFlight,
             workerSettings: [
-                'tries' => (int) $this->option('tries'),
-                'timeout' => (int) $this->option('timeout'),
+                'tries' => (int) $this->settingOr('tries', $horizon->tries),
+                'timeout' => (int) $this->settingOr('timeout', $horizon->timeout),
                 'backoff' => (int) $this->option('backoff'),
             ],
         );
@@ -227,6 +232,19 @@ final class ThrunNativeWorkCommand extends Command
     private function optionOr(string $name, mixed $fallback): mixed
     {
         return $this->option($name) ?? $fallback;
+    }
+
+    /**
+     * An option the operator typed wins; otherwise the value Horizon was
+     * configured with; otherwise the option's own default.
+     */
+    private function settingOr(string $name, ?int $configured): mixed
+    {
+        if ($this->input->hasParameterOption("--{$name}")) {
+            return $this->option($name);
+        }
+
+        return $configured ?? $this->option($name);
     }
 
     /**
