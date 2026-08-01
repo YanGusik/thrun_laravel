@@ -271,6 +271,15 @@ final readonly class ThrunWorkerFactory
 
             $app = require $basePath.'/bootstrap/app.php';
             $app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+
+            // A thread runs many coroutines against one application, and a plain
+            // bootstrap leaves them sharing one database and one Redis socket.
+            // laravel-spawn's async mode gives each coroutine its own; the guard
+            // keeps applications that did not opt into it untouched, because the
+            // same call also switches the connection pools on.
+            if ($app instanceof \Spawn\Laravel\Foundation\AsyncApplication) {
+                \Spawn\Laravel\Server\TrueAsyncServer::initializeApp($app);
+            }
         };
     }
 
