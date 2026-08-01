@@ -219,9 +219,6 @@ failed once with `TimeoutExceededException`.
   going, so run behind something that restarts on failure and watch your logs.
 - `timeout` must stay below `retry_after`, the same rule `queue:work` has: a job
   that outlives its reservation gets reserved a second time.
-- `retry_after` must also exceed the time a worker thread needs to boot the
-  application, a second or two on a cold cache. Set below that, the first jobs of
-  a run can have their reservations expire while the threads are still starting.
 
 See `tests/e2e/native/` for the end-to-end check and how to run it.
 

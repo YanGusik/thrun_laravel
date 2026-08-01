@@ -11,6 +11,7 @@ use LogicException;
 use Throwable;
 use Thrun\Contract\TransportInterface;
 use Thrun\Envelope\Envelope;
+use Thrun\Envelope\Stamp\TimeoutStamp;
 
 use function Async\delay;
 
@@ -133,12 +134,15 @@ final class LaravelQueueTransport implements TransportInterface
             // can report its result before the dispatch is recorded.
             $this->inFlight->dispatched();
 
+            // The timeout is thrun's own: it already runs each task under a
+            // cancellation token, so the adapter does not build a second one.
             return new Envelope(
                 [
                     'job' => ReservedJob::fromRedisJob($job, $this->connectionName, $name)->toArray(),
                     'options' => $this->workerSettings,
                 ],
                 type: self::ROUTE,
+                stamps: [new TimeoutStamp($this->workerSettings['timeout'] * 1000)],
             );
         }
 

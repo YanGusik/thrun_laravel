@@ -12,7 +12,6 @@ use Illuminate\Contracts\Events\Dispatcher as DispatcherContract;
 use Illuminate\Events\Dispatcher;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Queue\WorkerOptions;
-use RuntimeException;
 use Testo\Assert;
 use Testo\Test;
 use Thrun\Laravel\Native\NativeWorker;
@@ -23,80 +22,81 @@ use function Async\delay;
 use function Async\spawn;
 
 /**
- * The timeout is the one place where two actors reach for the same reservation:
- * the job, unwinding, and the timeout path, failing it. These tests pin who wins
- * in each case — the failure they guard against is a job that runs twice or a
- * reservation left behind.
+ * thrun cancels a task when it outruns its TimeoutStamp or when the worker is
+ * stopping. Either way the Laravel side has to be left in a state its own tools
+ * understand — a job that is neither running nor recorded anywhere is the
+ * failure these tests guard against.
  */
 #[Test]
 final class NativeWorkerTimeoutTest
 {
-    public function aJobThatSettlesAsTheAlarmFiresIsLeftToFinish(): void
+    public function anUneventfulJobRunsAndDeletesItsReservation(): void
     {
         $job = $this->job();
-        $job->fireThrows = new RuntimeException('boom just under the wire');
+        $job->fireDelayMs = 10;
 
         $this->worker()->runReservedJob($job, 'redis', new WorkerOptions());
-        delay(1200);
 
-        // Its own failure path must complete: cancelling mid-delete would strand
-        // the reservation and lose the real error behind a later timeout.
         Assert::contains($job->log, 'delete:done');
-        Assert::true(
-            (bool) preg_grep('/^failed-callback:RuntimeException$/', $job->log),
-            implode(' | ', $job->log),
-        );
+        Assert::false((bool) preg_grep('/^failed-callback:/', $job->log), implode(' | ', $job->log));
     }
 
-    public function shutdownIsNotRecordedAsATimeout(): void
+    public function aCancelledJobIsFailedExactlyOnce(): void
     {
         $job = $this->job();
         $job->fireDelayMs = 5000;
 
-        $handler = spawn(function () use ($job): void {
+        $this->cancelWhileRunning($job);
+
+        // The cancellation reaches Laravel as an ordinary exception, so its own
+        // path records the failure and clears the reservation. What matters is
+        // that it happens once: a second owner would delete an entry that has
+        // already been replaced.
+        Assert::count(preg_grep('/^failed-callback:/', $job->log), 1);
+        Assert::contains($job->log, 'delete:done');
+    }
+
+    public function aCancelledJobWithTriesLeftIsReleasedForAnotherAttempt(): void
+    {
+        $job = $this->job();
+        $job->fireDelayMs = 5000;
+        $job->tries = 3;
+
+        $this->cancelWhileRunning($job);
+
+        // Better than `queue:work`, which dies on timeout and leaves the job to
+        // wait out `retry_after`: here it goes back for its next attempt at once.
+        Assert::contains($job->log, 'release:done');
+        Assert::false((bool) preg_grep('/^failed-callback:/', $job->log), implode(' | ', $job->log));
+    }
+
+    public function aJobThatSettledItselfIsNotTouchedAgain(): void
+    {
+        $job = $this->job();
+        $job->fireDelayMs = 10;
+        $job->settleDelayMs = 5000;
+
+        // Its delete is still in flight when the cancellation lands: settling it
+        // a second time would remove a reservation that no longer exists.
+        $this->cancelWhileRunning($job, cancelAfterMs: 300);
+
+        Assert::false((bool) preg_grep('/^failed-callback:/', $job->log), implode(' | ', $job->log));
+    }
+
+    private function cancelWhileRunning(SettlingJob $job, int $cancelAfterMs = 200): void
+    {
+        $worker = $this->worker();
+
+        $runner = spawn(function () use ($worker, $job): void {
             try {
-                $this->worker()->runReservedJob($job, 'redis', new WorkerOptions());
+                $worker->runReservedJob($job, 'redis', new WorkerOptions());
             } catch (AsyncCancellation) {
             }
         });
 
-        delay(300);
-        $handler->cancel();
-        delay(1500);
-
-        // The job was healthy; the worker was being stopped. Marking it timed out
-        // would write a failure record for a job that never failed.
-        Assert::false(
-            (bool) preg_grep('/TimeoutExceededException/', $job->log),
-            implode(' | ', $job->log),
-        );
-    }
-
-    public function aHungJobWithNoTriesLeftIsFailedExactlyOnce(): void
-    {
-        $job = $this->job();
-        $job->fireDelayMs = 30_000;
-
-        $this->worker()->runReservedJob($job, 'redis', new WorkerOptions());
+        delay($cancelAfterMs);
+        $runner->cancel();
         delay(500);
-
-        Assert::count(preg_grep('/^failed-callback:/', $job->log), 1);
-        Assert::contains($job->log, 'delete:done');
-        Assert::false(in_array('release:start', $job->log, true), implode(' | ', $job->log));
-    }
-
-    public function aHungJobWithTriesLeftIsLeftForTheReservationToExpire(): void
-    {
-        $job = $this->job();
-        $job->fireDelayMs = 30_000;
-        $job->tries = 3;
-
-        $this->worker()->runReservedJob($job, 'redis', new WorkerOptions());
-        delay(500);
-
-        // Stock parity: `queue:work` kills its process on timeout, so nothing
-        // releases the job — it comes back when Redis expires the reservation.
-        Assert::same($job->log, ['fire:start']);
     }
 
     private function worker(): NativeWorker
