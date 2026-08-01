@@ -130,4 +130,29 @@ return [
         'App\\Jobs',
         'App\\Events',
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Job Payload Compression
+    |--------------------------------------------------------------------------
+    |
+    | Compresses the serialized job body of ordinary Laravel jobs (the
+    | `data.command` field) with lz4. The JSON envelope stays as it is, so
+    | Redis-side Lua and Horizon keep working.
+    |
+    | The setting controls writing only — compressed bodies are always read, so
+    | that turning it off leaves the jobs already queued runnable. To remove the
+    | package: turn this off, drain the queues, then uninstall.
+    |
+    | Requires ext-lz4: https://github.com/kjdev/php-ext-lz4
+    |
+    */
+
+    'compression' => [
+        'enabled'   => (bool) env('THRUN_COMPRESSION', false),
+
+        // Bodies below this size are stored as they are: lz4 plus base64 costs
+        // more than it saves on small ones.
+        'min_bytes' => (int) env('THRUN_COMPRESSION_MIN_BYTES', 512),
+    ],
 ];

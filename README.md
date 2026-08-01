@@ -163,6 +163,50 @@ $factory->extendFailed('database', function (array $config) {
 ],
 ```
 
+### Job Payload Compression
+
+Compresses the serialized body of **ordinary Laravel jobs** — the `data.command`
+field — with lz4. It applies to jobs dispatched the usual way, on Laravel's
+`redis` queue connection, and both `queue:work` and Horizon keep running them.
+(Thrun's own queues are a separate world with their own serializer; this setting
+does not touch them.)
+
+```php
+'compression' => [
+    'enabled'   => (bool) env('THRUN_COMPRESSION', false),
+    'min_bytes' => (int) env('THRUN_COMPRESSION_MIN_BYTES', 512),
+],
+```
+
+Requires [ext-lz4](https://github.com/kjdev/php-ext-lz4).
+
+Measured on PHP 8.6 (ZTS, TrueAsync), `serialize()` output of three job shapes:
+
+| Job | Plain | Compressed | Saved | Compress | Decompress |
+|---|---|---|---|---|---|
+| Notification, two scalars | 67 B | 67 B | — | 0.1 µs | — |
+| Mail to 50 recipients | 1709 B | 823 B | 52% | 2.0 µs | 2.4 µs |
+| Report export, 500 rows | 32210 B | 10851 B | 66% | 32.4 µs | 56.8 µs |
+
+Bodies below `min_bytes` are stored untouched — lz4 plus base64 costs more than
+it saves on small ones, as the first row shows.
+
+**Why only the body.** The JSON envelope around it stays JSON: Redis parses it
+server-side (`LuaScripts::pop()` runs `cjson.decode` to increment `attempts`) and
+Horizon reads the same JSON for its dashboard. Compressing the whole payload —
+for example by turning on phpredis' own serializer — breaks both, which is
+[laravel/horizon#1534](https://github.com/laravel/horizon/issues/1534).
+
+**Rollout and rollback.** The setting controls **writing** only; compressed
+bodies are always read. So a queue may hold both shapes at once, and turning the
+setting off leaves everything already queued runnable. To remove the package:
+turn compression off, drain the queues, then uninstall.
+
+Reading always on has a consequence worth stating plainly: installing this
+package replaces the framework's `CallQueuedHandler` and extends `queue:retry`,
+compression enabled or not. Both replacements only add the "unpack the body if it
+carries our marker" step and defer to the framework for everything else.
+
 ---
 
 ## Two Workflow Styles
