@@ -17,7 +17,9 @@
         "testo/testo": "^0.10.2"
     },
     "suggest": {
-        "ext-lz4": "Compresses job payloads (thrun.compression), https://github.com/kjdev/php-ext-lz4"
+        "ext-lz4": "Compresses job payloads (thrun.compression), https://github.com/kjdev/php-ext-lz4",
+        "yangusik/laravel-spawn": "Required by thrun:work-native — its async mode isolates concurrent jobs",
+        "laravel/horizon": "Supported alongside compression; its dashboard keeps working"
     },
     "autoload": {
         "psr-4": {

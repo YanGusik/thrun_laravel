@@ -19,6 +19,7 @@ use Thrun\Laravel\Console\ThrunFailedCommand;
 use Thrun\Laravel\Console\ThrunFailedFlushCommand;
 use Thrun\Laravel\Console\ThrunFailedShowCommand;
 use Thrun\Laravel\Console\ThrunFlushCommand;
+use Thrun\Laravel\Console\ThrunNativeWorkCommand;
 use Thrun\Laravel\Console\ThrunRetryCommand;
 use Thrun\Laravel\Console\ThrunWorkCommand;
 use Thrun\Laravel\Event\EventListener;
@@ -85,6 +86,7 @@ final class ThrunServiceProvider extends ServiceProvider
                 ThrunFailedFlushCommand::class,
                 ThrunFlushCommand::class,
                 ThrunRetryCommand::class,
+                ThrunNativeWorkCommand::class,
             ]);
 
             $this->publishes([

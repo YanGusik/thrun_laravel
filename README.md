@@ -163,6 +163,68 @@ $factory->extendFailed('database', function (array $config) {
 ],
 ```
 
+### Native Laravel Jobs
+
+Runs the jobs an application already has — `implements ShouldQueue`, dispatched
+with `dispatch()` — on thrun threads instead of `queue:work`. No `#[ThrunJob]`, no
+Message/Handler split, no change to the dispatch sites. The queue stays Laravel's
+own, so a stock worker can drain it at the same time.
+
+```bash
+php artisan thrun:work-native --queue=high,default
+```
+
+```php
+'native' => [
+    'queues'      => ['default'],   // polled in order, highest priority first
+    'threads'     => (int) env('THRUN_NATIVE_THREADS', 4),
+    'concurrency' => (int) env('THRUN_NATIVE_CONCURRENCY', 10),
+    'sleep'       => (float) env('THRUN_NATIVE_SLEEP', 1.0),
+],
+```
+
+Requires `yangusik/laravel-spawn`, `bootstrap/app.php` pointed at its
+`AsyncApplication`, and a **redis** queue connection. All three are checked at
+startup and refused with a clear message, because each of them fails silently
+otherwise: several coroutines share one thread, and laravel-spawn is what gives
+each of them its own container-scoped services, database connection and log
+context.
+
+**How it works.** The main thread reserves jobs through Laravel's own
+`RedisQueue::pop()`, so the Lua scripts, the `:reserved` set and the `attempts`
+counter behave exactly as under `queue:work`. Four strings cross into a worker
+thread, which rebuilds the job there and hands it to a subclass of Laravel's
+`Worker`. Deleting, releasing and failing all happen through the framework, which
+is how `maxTries`, `backoff`, `retryUntil`, job middleware, batches and
+`failed()` keep working unchanged.
+
+**Supported:** `--tries`, `--timeout`, `--backoff`, `queue:restart`, maintenance
+mode, `--max-jobs`, `--max-time`, `--stop-when-empty`, `--force`, and
+SIGTERM/SIGINT with a graceful drain (`--shutdown-grace`, 60s by default). A job's
+own `$tries`, `$timeout` and `$backoff` still win over the command's, as under
+`queue:work`.
+
+On timeout the behaviour matches `queue:work`: a job with attempts left is left
+reserved and comes back when the reservation expires; out of attempts, it is
+failed once with `TimeoutExceededException`.
+
+**Not supported, and worth knowing before adopting:**
+
+- The timeout is cooperative. A job stuck in a blocking C call or a CPU loop
+  cannot be interrupted the way `pcntl_alarm` kills a process — it holds its
+  thread until it returns.
+- `--memory` and Horizon's `queue:pause` are not implemented.
+- A lost database connection does not recycle the worker. `queue:work` exits so
+  its supervisor restarts it with a fresh connection; here the thread keeps
+  going, so run behind something that restarts on failure and watch your logs.
+- `timeout` must stay below `retry_after`, the same rule `queue:work` has: a job
+  that outlives its reservation gets reserved a second time.
+- `retry_after` must also exceed the time a worker thread needs to boot the
+  application, a second or two on a cold cache. Set below that, the first jobs of
+  a run can have their reservations expire while the threads are still starting.
+
+See `tests/e2e/native/` for the end-to-end check and how to run it.
+
 ### Job Payload Compression
 
 Compresses the serialized body of **ordinary Laravel jobs** — the `data.command`

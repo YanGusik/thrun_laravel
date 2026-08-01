@@ -133,6 +133,33 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Native Laravel Jobs
+    |--------------------------------------------------------------------------
+    |
+    | Settings for `thrun:work-native`, which runs the application's ordinary
+    | Laravel jobs — the ones dispatched with dispatch() — on thrun threads
+    | instead of `queue:work`. Jobs and dispatch sites stay as they are.
+    |
+    | Requires yangusik/laravel-spawn: its async mode is what keeps concurrent
+    | jobs on one thread from sharing container state.
+    |
+    */
+
+    'native' => [
+        // Polled in order, so the first name is the highest priority.
+        'queues'      => ['default'],
+
+        'threads'     => (int) env('THRUN_NATIVE_THREADS', 4),
+
+        // Jobs running at once per thread. Total = threads * concurrency.
+        'concurrency' => (int) env('THRUN_NATIVE_CONCURRENCY', 10),
+
+        // Seconds to wait after finding every queue empty.
+        'sleep'       => (float) env('THRUN_NATIVE_SLEEP', 1.0),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Job Payload Compression
     |--------------------------------------------------------------------------
     |
