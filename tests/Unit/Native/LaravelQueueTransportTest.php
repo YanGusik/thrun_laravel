@@ -15,6 +15,7 @@ use Thrun\Envelope\Envelope;
 use Thrun\Laravel\Native\LaravelQueueTransport;
 use Thrun\Laravel\Native\ProducerGate;
 use Thrun\Laravel\Tests\Fixture\RecordingExceptionHandler;
+use Thrun\Laravel\Tests\Fixture\RecordingLogger;
 use Thrun\Laravel\Tests\Fixture\UnusedRedisFactory;
 
 /**
@@ -88,6 +89,7 @@ final class LaravelQueueTransportTest
             sleepMs: 1,
             gate: $this->gate(),
             exceptions: new RecordingExceptionHandler(),
+            logger: new RecordingLogger(),
         );
 
         $transport->ack($envelope);
@@ -112,6 +114,7 @@ final class LaravelQueueTransportTest
             sleepMs: 1,
             gate: $this->gate(),
             exceptions: $exceptions,
+            logger: new RecordingLogger(),
         );
 
         // A Redis blip on one queue must not abort the run: jobs are running on
@@ -129,6 +132,7 @@ final class LaravelQueueTransportTest
             sleepMs: 1,
             gate: $this->gate(),
             exceptions: new RecordingExceptionHandler(),
+            logger: new RecordingLogger(),
             workerSettings: ['tries' => 3, 'timeout' => 120, 'backoff' => 5],
         );
 
@@ -149,6 +153,7 @@ final class LaravelQueueTransportTest
             sleepMs: 1,
             gate: $this->gate(stopWhenEmpty: true),
             exceptions: new RecordingExceptionHandler(),
+            logger: new RecordingLogger(),
         );
 
         // --stop-when-empty on a Redis blip would report a clean finish over a
@@ -172,6 +177,56 @@ final class LaravelQueueTransportTest
         Assert::true($transport->isDrained());
     }
 
+    public function reservingStopsAtTheWorkersCapacity(): void
+    {
+        $transport = $this->transport(['default' => $this->reservedJob('body', 'reserved')], maxInFlight: 1);
+
+        $envelope = $transport->tryReceive();
+
+        // A reservation ages from the moment pop() returns, so reserving beyond what
+        // the worker can start is reserving jobs whose window is already running out.
+        Assert::instanceOf($envelope, Envelope::class);
+        Assert::null($transport->tryReceive());
+
+        $transport->ack($envelope);
+
+        Assert::instanceOf($transport->tryReceive(), Envelope::class);
+    }
+
+    public function aRejectedJobFreesItsCapacityToo(): void
+    {
+        $transport = $this->transport(['default' => $this->reservedJob('body', 'reserved')], maxInFlight: 1);
+
+        $transport->reject($transport->tryReceive());
+
+        Assert::instanceOf($transport->tryReceive(), Envelope::class);
+    }
+
+    public function aSlotWhoseResultNeverArrivesIsTakenBack(): void
+    {
+        $logger    = new RecordingLogger();
+        $now       = 1000.0;
+        $transport = $this->transport(
+            ['default' => $this->reservedJob('body', 'reserved')],
+            maxInFlight: 1,
+            logger: $logger,
+            // By reference: an arrow function would freeze the clock at 1000.
+            clock: static function () use (&$now): float {
+                return $now;
+            },
+        );
+
+        $transport->tryReceive();
+        Assert::null($transport->tryReceive());
+
+        // The thread died with the job: no ack and no reject will ever come, and
+        // without this the slot would be held for the life of the process.
+        $now += 60 + 30 + 1;
+
+        Assert::instanceOf($transport->tryReceive(), Envelope::class);
+        Assert::count($logger->messages('warning'), 1);
+    }
+
     public function sendingIntoLaravelsQueueIsRefused(): void
     {
         $transport = $this->transport(['default' => null]);
@@ -193,6 +248,9 @@ final class LaravelQueueTransportTest
         array $queueNames = ['default'],
         ?ProducerGate $gate = null,
         ?RecordingExceptionHandler $exceptions = null,
+        int $maxInFlight = 0,
+        ?RecordingLogger $logger = null,
+        ?\Closure $clock = null,
     ): LaravelQueueTransport {
         return new LaravelQueueTransport(
             queues: $this->queueFactory($this->fakeQueue($jobsPerQueue)),
@@ -201,6 +259,9 @@ final class LaravelQueueTransportTest
             sleepMs: 1,
             gate: $gate ?? $this->gate(),
             exceptions: $exceptions ?? new RecordingExceptionHandler(),
+            logger: $logger ?? new RecordingLogger(),
+            maxInFlight: $maxInFlight,
+            clock: $clock,
         );
     }
 

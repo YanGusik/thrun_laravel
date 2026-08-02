@@ -19,12 +19,30 @@ In a Laravel application that has `yangusik/thrun-laravel` and
 2. Copy `RecordJob.php` into `app/Jobs/`, and `seed.php` and `verify.php` into
    the application root.
 3. Set `QUEUE_CONNECTION=redis` and point `REDIS_HOST` at a running Redis.
+4. Declare the queue and a supervisor of its own for it in `config/thrun.php`:
+
+   ```php
+   'queues' => [
+       'laravel_jobs' => [
+           'transport'       => 'laravel',
+           'queues'          => ['default'],
+           'stop_when_empty' => true,
+       ],
+   ],
+
+   'supervisors' => [
+       'e2e' => [
+           'queues' => ['laravel_jobs'],
+           'worker' => ['threads' => 4, 'concurrency' => 10],
+       ],
+   ],
+   ```
 
 ## Run
 
 ```bash
 php seed.php 20                              # dispatch 20 jobs
-php artisan thrun:work-native --stop-when-empty
+php artisan thrun:work --supervisor=e2e      # stop_when_empty ends the run
 php verify.php 20
 ```
 

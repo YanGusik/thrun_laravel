@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace Thrun\Laravel;
 
 use Illuminate\Contracts\Bus\Dispatcher as BusDispatcher;
+use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Queue\CallQueuedHandler;
 use Illuminate\Queue\Console\RetryCommand;
 use Illuminate\Support\ServiceProvider;
+use Psr\Log\LoggerInterface;
 use RuntimeException;
 use Thrun\Laravel\Bus\ThrunMessageBus;
 use Thrun\Laravel\Compression\CommandCompressor;
@@ -19,11 +21,11 @@ use Thrun\Laravel\Console\ThrunFailedCommand;
 use Thrun\Laravel\Console\ThrunFailedFlushCommand;
 use Thrun\Laravel\Console\ThrunFailedShowCommand;
 use Thrun\Laravel\Console\ThrunFlushCommand;
-use Thrun\Laravel\Console\ThrunNativeWorkCommand;
 use Thrun\Laravel\Console\ThrunRetryCommand;
 use Thrun\Laravel\Console\ThrunWorkCommand;
 use Thrun\Laravel\Event\EventListener;
 use Thrun\Laravel\Event\EventListenerRegistry;
+use Thrun\Laravel\Native\LaravelQueueTransportFactory;
 use Thrun\Laravel\Rpc\RpcAddress;
 use Thrun\Laravel\Rpc\RpcPublisher;
 use Thrun\Laravel\Rpc\RpcServerFactory;
@@ -47,8 +49,18 @@ final class ThrunServiceProvider extends ServiceProvider
                 config: $app['config'],
                 container: $app,
                 transportFactory: $app->make(TransportFactory::class),
+                logger: $app->make(LoggerInterface::class),
             );
         });
+
+        $this->app->singleton(LaravelQueueTransportFactory::class, fn($app) => new LaravelQueueTransportFactory(
+            app: $app,
+            config: $app['config'],
+            queues: $app->make('queue'),
+            cache: $app->make('cache')->driver(),
+            exceptions: $app->make(ExceptionHandler::class),
+            logger: $app->make(LoggerInterface::class),
+        ));
 
         $this->app->singleton(RpcAddress::class, fn($app) => RpcAddress::fromConfig($app['config']));
         $this->app->singleton(RpcServerFactory::class, fn($app) => new RpcServerFactory(
@@ -86,7 +98,6 @@ final class ThrunServiceProvider extends ServiceProvider
                 ThrunFailedFlushCommand::class,
                 ThrunFlushCommand::class,
                 ThrunRetryCommand::class,
-                ThrunNativeWorkCommand::class,
             ]);
 
             $this->publishes([

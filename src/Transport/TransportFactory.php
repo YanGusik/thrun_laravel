@@ -11,6 +11,7 @@ use Thrun\Contract\FailedJobStoreInterface;
 use Thrun\Contract\ReceiverInterface;
 use Thrun\Contract\SenderInterface;
 use Thrun\Contract\TransportInterface;
+use Thrun\Laravel\Native\LaravelQueueTransportFactory;
 use Thrun\Serialization\ClassMapMessageTypeResolver;
 use Thrun\Serialization\JsonSerializer;
 use Thrun\Transport\Failed\NullFailedJobSender;
@@ -65,16 +66,22 @@ final class TransportFactory
      * Build the composed receiver for a given supervisor.
      *
      * @param list<string> $queueNames
+     * @param int          $maxInFlight jobs the worker will hold at once; only a transport that owns its messages
+     *                                  until they are answered for needs it, and 0 leaves such a transport unbounded
      */
-    public function createReceiver(array $queueNames, array $strategyConfig = [], array $policyConfig = []): ReceiverInterface
-    {
+    public function createReceiver(
+        array $queueNames,
+        array $strategyConfig = [],
+        array $policyConfig = [],
+        int $maxInFlight = 0,
+    ): ReceiverInterface {
         if ($queueNames === []) {
             return new InMemoryTransport();
         }
 
         $receivers = [];
         foreach ($queueNames as $name) {
-            $receivers[$name] = $this->getQueueTransport($name);
+            $receivers[$name] = $this->getQueueTransport($name, $maxInFlight);
         }
 
         if (count($receivers) === 1) {
@@ -92,7 +99,11 @@ final class TransportFactory
 
     /**
      * Create a sender for a specific queue name.
-     * Returns the same instance used by receivers for this queue (shared transport).
+     *
+     * Returns the same instance used by receivers for this queue, except where the
+     * transport describes a run rather than a queue — see {@see isShareable()}.
+     * Laravel's own queue is not a destination at all: jobs enter it through the
+     * framework's dispatcher, and the transport returned here refuses to send.
      */
     public function createSender(string $queue = 'default'): TransportInterface
     {
@@ -134,7 +145,13 @@ final class TransportFactory
         };
     }
 
-    public function getQueueTransport(string $name): TransportInterface
+    /**
+     * The transport behind a queue name, built once per name where that is safe.
+     *
+     * @param int $maxInFlight see {@see createReceiver()}; ignored by a transport
+     *                         that hands its messages over and forgets them
+     */
+    public function getQueueTransport(string $name, int $maxInFlight = 0): TransportInterface
     {
         if (isset($this->transports[$name])) {
             return $this->transports[$name];
@@ -146,15 +163,34 @@ final class TransportFactory
             throw new \InvalidArgumentException("Queue \"{$name}\" not found in config/thrun.php [queues]");
         }
 
-        $this->transports[$name] = $this->buildQueueTransport($name, $globalQueues[$name]);
+        $transport = $this->buildQueueTransport($name, $globalQueues[$name], $maxInFlight);
 
-        return $this->transports[$name];
+        if (self::isShareable($globalQueues[$name])) {
+            $this->transports[$name] = $transport;
+        }
+
+        return $transport;
+    }
+
+    /**
+     * Whether two workers may be handed the same transport instance.
+     *
+     * A transport that keeps track of the messages it has given out — the laravel
+     * one counts reservations against a worker's capacity — describes one run, not
+     * one queue, and sharing it would have two workers spending one budget.
+     *
+     * @param array<string, mixed> $queueConfig
+     */
+    private static function isShareable(array $queueConfig): bool
+    {
+        return ($queueConfig['transport'] ?? 'redis') !== 'laravel';
     }
 
     /**
      * @param array<string, mixed> $queueConfig
+     * @param int                  $maxInFlight see {@see createReceiver()}
      */
-    public function buildQueueTransport(string $name, array $queueConfig): TransportInterface
+    public function buildQueueTransport(string $name, array $queueConfig, int $maxInFlight = 0): TransportInterface
     {
         $type = $queueConfig['transport'] ?? 'redis';
 
@@ -182,8 +218,25 @@ final class TransportFactory
         return match ($type) {
             'redis' => $this->createRedisTransport($name),
             'memory' => new InMemoryTransport(),
+            'laravel' => $this->createLaravelTransport($queueConfig, $maxInFlight),
             default => throw new \InvalidArgumentException("Unknown transport type: {$type}"),
         };
+    }
+
+    /**
+     * The application's own queue, drained by thrun instead of `queue:work`.
+     *
+     * @param array<string, mixed> $queueConfig
+     */
+    private function createLaravelTransport(array $queueConfig, int $maxInFlight): TransportInterface
+    {
+        if ($this->container === null) {
+            throw new \InvalidArgumentException(
+                'The laravel transport needs the application container; build the factory with one.'
+            );
+        }
+
+        return $this->container->make(LaravelQueueTransportFactory::class)->create($queueConfig, $maxInFlight);
     }
 
     private function createRedisClient(): \Redis

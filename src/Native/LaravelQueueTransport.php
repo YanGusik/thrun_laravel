@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace Thrun\Laravel\Native;
 
+use Closure;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Queue\Factory as QueueFactory;
 use Illuminate\Queue\Jobs\RedisJob;
 use LogicException;
+use Psr\Log\LoggerInterface;
 use Throwable;
 use Thrun\Contract\TransportInterface;
 use Thrun\Envelope\Envelope;
@@ -21,21 +23,62 @@ use function Async\delay;
  * Reserving goes through `Illuminate\Queue\RedisQueue::pop()`, so the Lua
  * scripts, the `:reserved` set and the `attempts` counter behave exactly as they
  * do under `queue:work` — none of that is reimplemented here.
+ *
+ * Unlike thrun's own transports this one stops reserving once the jobs it has
+ * handed over reach the worker's capacity. A reservation ages on Laravel's
+ * clock from the moment `pop()` returns, so a job waiting its turn spends the
+ * window it was given; everything between here and the thread that runs it —
+ * the multi-queue buffer, the pool's own queue — is time the job cannot get
+ * back.
  */
 final class LaravelQueueTransport implements TransportInterface
 {
     /** Route key of the envelopes this transport produces. */
     public const ROUTE = 'laravel.job';
 
+    /** How often a producer parked at capacity looks again. */
+    private const CAPACITY_POLL_MS = 5;
+
+    /**
+     * Added to the reservation's own lifetime before its slot is taken back.
+     *
+     * The slot is normally freed by ack() or reject(); this covers the job whose
+     * result never arrives at all, a thread that died with it.
+     */
+    private const LOST_RESULT_GRACE_SECONDS = 30;
+
     private bool $closed = false;
 
     private bool $drained = false;
 
     /**
+     * Reservations handed to the worker and not yet answered for.
+     *
+     * Keyed by the reserved payload, which is what identifies a reservation to
+     * Laravel; the value is the point in time after which the slot is presumed
+     * lost. Unix seconds, as {@see microtime()} reports them.
+     *
+     * @var array<string, float>
+     */
+    private array $inFlight = [];
+
+    /** @var Closure(): float */
+    private readonly Closure $clock;
+
+    /**
      * @param list<string>                                  $queueNames     polled in order, highest priority first
      * @param int                                           $sleepMs        pause after an empty sweep of every queue
+     * @param int                                           $maxInFlight    reservations allowed out at once; 0 removes
+     *                                                                      the limit, which only suits a caller that
+     *                                                                      runs each job as it arrives
+     * @param int                                           $retryAfter     seconds the connection gives a reservation
+     *                                                                      before Laravel hands the job to somebody
+     *                                                                      else; the same number as
+     *                                                                      `queue.connections.*.retry_after`
      * @param array{tries: int, timeout: int, backoff: int} $workerSettings travels with every job: the thread that
      *                                                                      runs it cannot see this process's options
+     * @param (Closure(): float)|null                       $clock          unix seconds; passed in so tests can move
+     *                                                                      time instead of waiting for it
      */
     public function __construct(
         private readonly QueueFactory $queues,
@@ -44,8 +87,13 @@ final class LaravelQueueTransport implements TransportInterface
         private readonly int $sleepMs,
         private readonly ProducerGate $gate,
         private readonly ExceptionHandler $exceptions,
+        private readonly LoggerInterface $logger,
+        private readonly int $maxInFlight = 0,
+        private readonly int $retryAfter = 60,
         private readonly array $workerSettings = ['tries' => 1, 'timeout' => 60, 'backoff' => 0],
+        ?Closure $clock = null,
     ) {
+        $this->clock = $clock ?? static fn(): float => microtime(true);
     }
 
     /**
@@ -63,6 +111,12 @@ final class LaravelQueueTransport implements TransportInterface
 
             if ($this->gate->shouldPause()) {
                 delay($this->sleepMs);
+
+                continue;
+            }
+
+            if ($this->atCapacity()) {
+                delay(self::CAPACITY_POLL_MS);
 
                 continue;
             }
@@ -97,6 +151,10 @@ final class LaravelQueueTransport implements TransportInterface
      */
     public function tryReceive(int &$failures = 0): ?Envelope
     {
+        if ($this->atCapacity()) {
+            return null;
+        }
+
         $queue = $this->queues->connection($this->connectionName);
 
         foreach ($this->queueNames as $index => $name) {
@@ -129,13 +187,16 @@ final class LaravelQueueTransport implements TransportInterface
             $this->gate->jobReserved();
 
             $reserved = ReservedJob::fromRedisJob($job, $this->connectionName, $name);
+            $timeout  = $this->timeoutFor($job);
+
+            $this->inFlight[$reserved->reserved] = ($this->clock)() + $this->retryAfter + self::LOST_RESULT_GRACE_SECONDS;
 
             // The timeout is thrun's own: it already runs each task under a
             // cancellation token, so the adapter does not build a second one.
             return new Envelope(
                 ['job' => $reserved->toArray(), 'options' => $this->workerSettings],
                 type: self::ROUTE,
-                stamps: [new TimeoutStamp($this->timeoutFor($job) * 1000)],
+                stamps: [new TimeoutStamp($timeout * 1000)],
             );
         }
 
@@ -160,17 +221,83 @@ final class LaravelQueueTransport implements TransportInterface
     }
 
     /**
-     * Does nothing, deliberately. The reservation belongs to Laravel, whose worker
-     * deleted it inside the thread that ran the job; a second owner here would
-     * remove an entry that has since been replaced.
+     * Frees the capacity the job occupied, and nothing else.
+     *
+     * The reservation itself belongs to Laravel, whose worker deleted it inside
+     * the thread that ran the job; a second owner here would remove an entry that
+     * has since been replaced.
      */
     public function ack(Envelope $envelope): void
     {
+        $this->releaseSlot($envelope);
     }
 
-    /** Does nothing, for the same reason as {@see ack()}: Laravel already released or failed the job. */
+    /** Does the same as {@see ack()}: Laravel already released or failed the job, only the slot is ours. */
     public function reject(Envelope $envelope): void
     {
+        $this->releaseSlot($envelope);
+    }
+
+    /**
+     * Whether reserving must wait for a job to come back.
+     *
+     * Slots whose job can no longer be running are taken back here rather than on
+     * a timer: the count is only consulted from this one place, so a lazy sweep
+     * cannot be late.
+     */
+    private function atCapacity(): bool
+    {
+        if ($this->maxInFlight <= 0) {
+            return false;
+        }
+
+        if (count($this->inFlight) < $this->maxInFlight) {
+            return false;
+        }
+
+        $this->releaseLostSlots();
+
+        return count($this->inFlight) >= $this->maxInFlight;
+    }
+
+    /**
+     * Take back the slots of reservations that have outlived their own window.
+     *
+     * A thread that dies mid-job takes the result with it, and its slot would
+     * otherwise be held for the life of the process. The deadline is the
+     * connection's `retry_after` plus a margin, not the job's timeout, because
+     * that is when Laravel stops treating this worker as the owner: past it the
+     * job is back in the ready list for anyone to take, so the slot no longer
+     * stands for anything. Reclaiming earlier would over-admit against a job this
+     * worker is still holding — which is a live risk when the queue shares a
+     * worker with others, since the wait before a thread picks a job up is not
+     * this transport's to see.
+     */
+    private function releaseLostSlots(): void
+    {
+        $now = ($this->clock)();
+
+        foreach ($this->inFlight as $reserved => $deadline) {
+            if ($deadline > $now) {
+                continue;
+            }
+
+            unset($this->inFlight[$reserved]);
+
+            $this->logger->warning('Thrun: a native job\'s result never arrived; its slot was reclaimed.', [
+                'connection' => $this->connectionName,
+                'overdue_by' => round($now - $deadline, 3),
+            ]);
+        }
+    }
+
+    private function releaseSlot(Envelope $envelope): void
+    {
+        $message = $envelope->message;
+
+        if (is_array($message) && isset($message['job']['reserved'])) {
+            unset($this->inFlight[$message['job']['reserved']]);
+        }
     }
 
     /** Stop reserving. The current wait ends, and receive() returns null from then on. */

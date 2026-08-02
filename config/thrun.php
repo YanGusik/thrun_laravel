@@ -25,6 +25,47 @@ return [
         'video_processing' => [
             'transport' => 'redis',
         ],
+
+        // The application's own Laravel queue, drained by thrun instead of
+        // `queue:work`. Jobs and dispatch() calls stay exactly as they are.
+        //
+        // A supervisor that lists this queue boots a full Laravel application in
+        // every thread, and its concurrency drops to one job per thread unless
+        // bootstrap/app.php builds an AsyncApplication (yangusik/laravel-spawn):
+        // without it the jobs on a thread would share one container.
+        //
+        // Everything `queue:work` takes on the command line is written here, and
+        // what Horizon was already configured with fills in whatever is left out.
+        //
+        // 'laravel_jobs'  => [
+        //     'transport'       => 'laravel',
+        //
+        //     // null takes queue.default. Redis connections only.
+        //     'connection'      => null,
+        //
+        //     // Polled in order, so the first name is the highest priority.
+        //     // Omit the key to take Horizon's queues for this connection.
+        //     'queues'          => ['default'],
+        //
+        //     // Seconds to wait after finding every queue empty.
+        //     'sleep'           => 1.0,
+        //
+        //     // As --tries, --timeout and --backoff. A job that declares its own
+        //     // $tries or $timeout still wins, as it does under queue:work.
+        //     'tries'           => 1,
+        //     'timeout'         => 60,
+        //     'backoff'         => 0,
+        //
+        //     // Limits that end the run — and with it the whole process, since
+        //     // thrun:work stops its other supervisors once one of them returns.
+        //     // A queue that uses them wants a process of its own. 0 = no limit.
+        //     'max_jobs'        => 0,
+        //     'max_time'        => 0,
+        //     'stop_when_empty' => false,
+        //
+        //     // Keep working while the application is down for maintenance.
+        //     'force'           => false,
+        // ],
     ],
 
     // Supervisors — each is an isolated Supervisor + Worker pair.
@@ -38,6 +79,10 @@ return [
                 'threads'     => (int) env('THRUN_WORKER_THREADS', 2),
                 'concurrency' => (int) env('THRUN_WORKER_CONCURRENCY', 100),
                 'queue_size'  => (int) env('THRUN_WORKER_QUEUE_SIZE', 1000),
+
+                // Seconds a shutdown waits for jobs that do not end on their own.
+                // Only a run that can finish reaches it — see the laravel transport.
+                // 'shutdown_grace' => 60,
             ],
 
             'supervisor' => [
@@ -129,33 +174,6 @@ return [
         'App\\Handlers',
         'App\\Jobs',
         'App\\Events',
-    ],
-
-    /*
-    |--------------------------------------------------------------------------
-    | Native Laravel Jobs
-    |--------------------------------------------------------------------------
-    |
-    | Settings for `thrun:work-native`, which runs the application's ordinary
-    | Laravel jobs — the ones dispatched with dispatch() — on thrun threads
-    | instead of `queue:work`. Jobs and dispatch sites stay as they are.
-    |
-    | Requires yangusik/laravel-spawn: its async mode is what keeps concurrent
-    | jobs on one thread from sharing container state.
-    |
-    */
-
-    'native' => [
-        // Polled in order, so the first name is the highest priority.
-        'queues'      => ['default'],
-
-        'threads'     => (int) env('THRUN_NATIVE_THREADS', 4),
-
-        // Jobs running at once per thread. Total = threads * concurrency.
-        'concurrency' => (int) env('THRUN_NATIVE_CONCURRENCY', 10),
-
-        // Seconds to wait after finding every queue empty.
-        'sleep'       => (float) env('THRUN_NATIVE_SLEEP', 1.0),
     ],
 
     /*
