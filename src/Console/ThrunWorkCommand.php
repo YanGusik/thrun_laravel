@@ -39,17 +39,19 @@ final class ThrunWorkCommand extends Command
             $rpcEnabled ? ' + RPC server' : '',
         ));
 
-        $slots = count($supervisors)
-            + ($rpcEnabled ? 1 : 0)
-            + ($this->option('stats') ? 1 : 0);
-
         $scope   = new Scope();
-        $taskSet = new TaskSet(concurrency: $slots, scope: $scope);
+        $taskSet = new TaskSet(concurrency: count($supervisors), scope: $scope);
         $metrics = new InMemoryMetrics();
+
+        // The RPC server and the stats printer never end on their own; they are
+        // here to serve the supervisors and are cancelled once the last one is
+        // done. Keeping them out of the TaskSet is what lets the wait below mean
+        // "wait for the work", rather than "wait for whatever finishes first".
+        $services = new Scope();
 
         // rpc
         if ($rpcEnabled) {
-            $taskSet->spawn(function () use ($rpcFactory): void {
+            $services->spawn(function () use ($rpcFactory): void {
                 $rpcFactory->create()->run();
             });
         }
@@ -64,7 +66,7 @@ final class ThrunWorkCommand extends Command
 
         // Stats
         if ($this->option('stats')) {
-            $taskSet->spawn(function () use ($metrics, $supervisors): void {
+            $services->spawn(function () use ($metrics, $supervisors): void {
                 $label = implode(', ', $supervisors);
                 while (true) {
                     $startTime = hrtime(true);
@@ -84,24 +86,14 @@ final class ThrunWorkCommand extends Command
             });
         }
 
-        $failed = false;
-
-        while ($taskSet->count() !== 0) {
-            try {
-                $taskSet->joinNext()->await();
-            } catch (\Cancellation $e) {
-            } catch (\Exception $e) {
-                $failed = true;
-                $this->error(sprintf(
-                    'Task failed: %s in %s:%d',
-                    $e->getMessage(),
-                    $e->getFile(),
-                    $e->getLine(),
-                ));
-            } finally {
-                $taskSet->cancel();
-            }
-        }
+        $failed = new SupervisorTasks($taskSet, $services)->awaitAll(function (\Exception $e): void {
+            $this->error(sprintf(
+                'Task failed: %s in %s:%d',
+                $e->getMessage(),
+                $e->getFile(),
+                $e->getLine(),
+            ));
+        });
 
         $this->info('Thrun stopped.');
         $this->info(sprintf(
