@@ -9,6 +9,7 @@ use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Log\Context\Repository as ContextRepository;
+use Illuminate\Queue\Events\JobFailed;
 use RuntimeException;
 use Spawn\Laravel\Foundation\AsyncApplication;
 use Spawn\Laravel\Server\TrueAsyncServer;
@@ -81,6 +82,8 @@ final class ThreadBootstrapper
             );
         }
 
+        self::recordFailedJobs($app);
+
         $app->singleton(NativeWorker::class, function ($app) {
             $worker = new NativeWorker(
                 $app->make('queue'),
@@ -93,5 +96,30 @@ final class ThreadBootstrapper
             // the framework counts exceptions there. `queue:work` does the same.
             return $worker->setCache($app->make('cache')->driver());
         });
+    }
+
+    /**
+     * Registers the listener that writes every job the framework gives up on to
+     * the application's failed-job store.
+     *
+     * Nothing in the framework does this on its own: the only writer is a
+     * `JobFailed` listener that the `queue:work` command installs, and native
+     * mode drives the worker without that command. Left out, a job that
+     * exhausted its attempts is logged and then forgotten — `queue:failed` shows
+     * nothing and `queue:retry` has nothing to replay.
+     */
+    private static function recordFailedJobs(Application $app): void
+    {
+        $app->make('events')->listen(
+            JobFailed::class,
+            static function (JobFailed $event) use ($app): void {
+                $app->make('queue.failer')->log(
+                    $event->connectionName,
+                    $event->job->getQueue(),
+                    $event->job->getRawBody(),
+                    $event->exception,
+                );
+            },
+        );
     }
 }
