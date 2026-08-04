@@ -7,9 +7,11 @@ namespace Thrun\Laravel\Console;
 use Async\Scope;
 use Async\TaskSet;
 use Illuminate\Console\Command;
+use Thrun\Envelope\Envelope;
 use Thrun\Laravel\Rpc\RpcServerFactory;
 use Thrun\Laravel\Worker\ThrunWorkerFactory;
 use Thrun\Worker\Metrics\InMemoryMetrics;
+use Thrun\Worker\Outcome;
 use Illuminate\Contracts\Config\Repository as ConfigContract;
 
 final class ThrunWorkCommand extends Command
@@ -58,7 +60,7 @@ final class ThrunWorkCommand extends Command
         foreach ($supervisors as $name) {
             $this->line("[{$name}] Starting...");
             $taskSet->spawn(function () use ($factory, $name, $metrics): void {
-                $factory->createSupervisor($name, $metrics)->run();
+                $factory->createSupervisor($name, $metrics, onResult: $this->reportFailedJob(...))->run();
             });
         }
 
@@ -112,6 +114,51 @@ final class ThrunWorkCommand extends Command
         ));
 
         return $failed ? self::FAILURE : self::SUCCESS;
+    }
+
+    /**
+     * Prints a job that did not succeed.
+     *
+     * Without this the console stays silent about failures: a Laravel job
+     * settles inside its own thread, so nothing reaches thrun's error path, and
+     * `--stats` shows totals that a reader has to be watching to notice.
+     *
+     * @param array{ok: bool, outcome?: string, envelope: Envelope, error?: array{class: string, message: string}|null} $result
+     */
+    private function reportFailedJob(array $result): void
+    {
+        $outcome = $result['outcome'] ?? ($result['ok'] ? Outcome::Success->value : Outcome::Failure->value);
+
+        if ($outcome !== Outcome::Failure->value) {
+            return;
+        }
+
+        $error = $result['error'] ?? null;
+
+        $this->error(sprintf(
+            'Job failed: %s%s',
+            $this->describeJob($result['envelope']),
+            $error === null ? '' : sprintf(' — %s: %s', $error['class'], $error['message']),
+        ));
+    }
+
+    /**
+     * The job's display name when the envelope carries a Laravel payload, its
+     * message type otherwise — the adapter is not the only producer of work.
+     */
+    private function describeJob(Envelope $envelope): string
+    {
+        $message = $envelope->message;
+
+        if (is_array($message) && isset($message['job']['body'])) {
+            $body = json_decode($message['job']['body'], true);
+
+            if (is_array($body) && isset($body['displayName'])) {
+                return (string) $body['displayName'];
+            }
+        }
+
+        return $envelope->routeKey ?? $envelope->type ?? 'unknown';
     }
 
     /**

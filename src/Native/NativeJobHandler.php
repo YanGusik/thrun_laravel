@@ -7,11 +7,13 @@ namespace Thrun\Laravel\Native;
 use Illuminate\Container\Container as ContainerInstance;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Debug\ExceptionHandler;
+use Illuminate\Contracts\Queue\Job;
 use Illuminate\Queue\Jobs\RedisJob;
 use Illuminate\Queue\RedisQueue;
 use Illuminate\Queue\WorkerOptions;
 use Throwable;
 use Thrun\Worker\Acknowledger;
+use Thrun\Worker\Outcome;
 
 /**
  * Runs one Laravel job inside a worker thread.
@@ -33,6 +35,7 @@ final class NativeJobHandler
 
         // The application booted by this thread's bootloader.
         $app = ContainerInstance::getInstance();
+        $job = null;
 
         try {
             $queue = $app->make('queue')->connection($reserved->connectionName);
@@ -56,12 +59,31 @@ final class NativeJobHandler
                 $this->workerOptions($payload['options']),
             );
         } finally {
-            // Always ack, whatever happened. Laravel has already deleted, released
-            // or failed the job through its own worker; letting thrun see a failure
-            // here would make it write a second failure record and, worse, push a
-            // retry copy of a job Laravel is already retrying.
-            $acknowledger->ack();
+            // Report the outcome rather than act on it. Laravel has already
+            // deleted, released or failed the job through its own worker, so
+            // failing it here as well would write a second failure record and
+            // push a retry copy of a job Laravel is already retrying.
+            $acknowledger->observe($this->outcomeOf($job));
         }
+    }
+
+    /**
+     * Failure comes before release because a job released after an exception
+     * carries both flags, and the last attempt of such a job is a failure. A job
+     * that never came into being — the reservation was lost, or the queue
+     * connection did not open — counts as nothing: nobody ran it.
+     */
+    private function outcomeOf(?Job $job): Outcome
+    {
+        if ($job === null) {
+            return Outcome::Skipped;
+        }
+
+        return match (true) {
+            $job->hasFailed()  => Outcome::Failure,
+            $job->isReleased() => Outcome::Retried,
+            default            => Outcome::Success,
+        };
     }
 
     /**
