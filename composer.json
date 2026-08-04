@@ -10,11 +10,26 @@
         "yangusik/thrun": "*",
         "illuminate/console": "^11.0 || ^12.0 || ^13.0",
         "illuminate/container": "^11.0 || ^12.0 || ^13.0",
-        "illuminate/support": "^11.0 || ^12.0 || ^13.0"
+        "illuminate/queue": "^11.0 || ^12.0 || ^13.0",
+        "illuminate/support": "^11.0 || ^12.0 || ^13.0",
+        "psr/log": "^3.0"
+    },
+    "require-dev": {
+        "testo/testo": "^0.10.2"
+    },
+    "suggest": {
+        "ext-lz4": "Compresses job payloads (thrun.compression), https://github.com/kjdev/php-ext-lz4",
+        "yangusik/laravel-spawn": "Lets a queue with the laravel transport run more than one job per thread",
+        "laravel/horizon": "Supported alongside compression; its dashboard keeps working"
     },
     "autoload": {
         "psr-4": {
             "Thrun\\Laravel\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Thrun\\Laravel\\Tests\\": "tests/"
         }
     },
     "extra": {

@@ -7,13 +7,19 @@ namespace Thrun\Laravel\Console;
 use Async\Scope;
 use Async\TaskSet;
 use Illuminate\Console\Command;
+use Thrun\Envelope\Envelope;
 use Thrun\Laravel\Rpc\RpcServerFactory;
 use Thrun\Laravel\Worker\ThrunWorkerFactory;
 use Thrun\Worker\Metrics\InMemoryMetrics;
+use Thrun\Worker\Outcome;
 use Illuminate\Contracts\Config\Repository as ConfigContract;
 
 final class ThrunWorkCommand extends Command
 {
+    /** One `--stats` line per interval, built from readings taken this often. */
+    private const int STATS_INTERVAL_MS = 1000;
+    private const int STATS_SAMPLE_MS = 50;
+
     protected $signature = 'thrun:work
                             {--supervisor= : Run a specific supervisor only}
                             {--stats : Show real-time stats UI}
@@ -60,7 +66,7 @@ final class ThrunWorkCommand extends Command
         foreach ($supervisors as $name) {
             $this->line("[{$name}] Starting...");
             $taskSet->spawn(function () use ($factory, $name, $metrics): void {
-                $factory->createSupervisor($name, $metrics)->run();
+                $factory->createSupervisor($name, $metrics, onResult: $this->reportFailedJob(...))->run();
             });
         }
 
@@ -71,14 +77,26 @@ final class ThrunWorkCommand extends Command
                 while (true) {
                     $startTime = hrtime(true);
                     $processed = $metrics->processed;
-                    \Async\delay(1000);
+
+                    // A job usually lives for milliseconds, so one reading per
+                    // line lands between two of them and reports an idle worker.
+                    $activePeak = $metrics->active;
+
+                    $samples = intdiv(self::STATS_INTERVAL_MS, self::STATS_SAMPLE_MS);
+
+                    for ($sample = 0; $sample < $samples; $sample++) {
+                        \Async\delay(self::STATS_SAMPLE_MS);
+                        $activePeak = max($activePeak, $metrics->active);
+                    }
+
                     $line = sprintf(
-                        "  INFO  [%s] Processed: %d | Failed: %d | Timeout: %d | Active: %d | %.1f jobs/sec",
+                        "  INFO  [%s] Processed: %d | Failed: %d | Retried: %d | Timeout: %d | Active peak: %d | %.1f jobs/sec",
                         $label,
                         $metrics->processed,
                         $metrics->failed,
+                        $metrics->retried,
                         $metrics->timedOut,
-                        $metrics->active,
+                        $activePeak,
                         $metrics->throughput($startTime, $processed),
                     );
                     $this->info($line);
@@ -104,6 +122,50 @@ final class ThrunWorkCommand extends Command
         ));
 
         return $failed ? self::FAILURE : self::SUCCESS;
+    }
+
+    /**
+     * Prints a job that did not succeed.
+     *
+     * A Laravel job settles inside its own thread, so nothing reaches thrun's
+     * error path and the console would otherwise say nothing at all.
+     *
+     * @param array{ok: bool, outcome?: string, envelope: Envelope, error?: array{class: string, message: string}|null} $result
+     */
+    private function reportFailedJob(array $result): void
+    {
+        $outcome = $result['outcome'] ?? ($result['ok'] ? Outcome::Success->value : Outcome::Failure->value);
+
+        if ($outcome !== Outcome::Failure->value) {
+            return;
+        }
+
+        $error = $result['error'] ?? null;
+
+        $this->error(sprintf(
+            'Job failed: %s%s',
+            $this->describeJob($result['envelope']),
+            $error === null ? '' : sprintf(' — %s: %s', $error['class'], $error['message']),
+        ));
+    }
+
+    /**
+     * The job's display name when the envelope carries a Laravel payload, its
+     * message type otherwise — the adapter is not the only producer of work.
+     */
+    private function describeJob(Envelope $envelope): string
+    {
+        $message = $envelope->message;
+
+        if (is_array($message) && isset($message['job']['body'])) {
+            $body = json_decode($message['job']['body'], true);
+
+            if (is_array($body) && isset($body['displayName'])) {
+                return (string) $body['displayName'];
+            }
+        }
+
+        return $envelope->routeKey ?? $envelope->type ?? 'unknown';
     }
 
     /**

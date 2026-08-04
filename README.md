@@ -163,6 +163,168 @@ $factory->extendFailed('database', function (array $config) {
 ],
 ```
 
+### Native Laravel Jobs
+
+Runs the jobs an application already has — `implements ShouldQueue`, dispatched
+with `dispatch()` — on thrun threads instead of `queue:work`. No `#[ThrunJob]`, no
+Message/Handler split, no change to the dispatch sites. The queue stays Laravel's
+own, so a stock worker can drain it at the same time.
+
+Laravel's queue is declared as one more thrun queue, with the `laravel`
+transport, and a supervisor picks it up like any other:
+
+```php
+'queues' => [
+    'emails'       => ['transport' => 'redis'],
+
+    'laravel_jobs' => [
+        'transport'  => 'laravel',
+        'connection' => null,        // null takes queue.default
+        'queues'     => ['high', 'default'],
+        'sleep'      => 1.0,
+        'tries'      => 1,
+        'timeout'    => 60,
+        'backoff'    => 0,
+    ],
+],
+
+'supervisors' => [
+    'default' => [
+        'queues' => ['emails', 'laravel_jobs'],
+        'worker' => ['threads' => 4, 'concurrency' => 10],
+    ],
+],
+```
+
+```bash
+php artisan thrun:work
+```
+
+One supervisor can carry both kinds at once, which is what a gradual migration
+needs: messages already rewritten for thrun and jobs still written for Laravel
+share the same threads, and `strategy` decides who goes first. Keeping them in
+separate supervisors is equally valid — same process, same command, own threads
+each.
+
+**Coming from Horizon?** If `config/horizon.php` is present, the supervisors for
+this connection supply the defaults — every one of their queues, plus `tries`,
+`timeout`, `maxTime` and `maxJobs` — so the settings the application already runs
+on are not restated. A key written in `config/thrun.php` always wins; its absence
+is what lets Horizon's value through. Where Horizon runs several supervisors on
+one connection with different retries, one worker cannot: the queues are all
+served, the numbers come from the first supervisor, and that is logged at
+startup.
+
+Requires a **redis** queue connection, checked while the worker is being built.
+
+`yangusik/laravel-spawn` is optional and decides how many jobs may share a
+thread. With `bootstrap/app.php` pointed at its `AsyncApplication`, each
+coroutine gets its own container-scoped services, database connection and log
+context, and `concurrency` applies as configured. Without it there is nothing to
+keep concurrent jobs apart, so the whole supervisor drops to one job per thread
+and logs why — parallelism then comes from `threads` alone. A supervisor that
+carries no Laravel jobs is unaffected, which is a reason to give them one of
+their own.
+
+**How it works.** The main thread reserves jobs through Laravel's own
+`RedisQueue::pop()`, so the Lua scripts, the `:reserved` set and the `attempts`
+counter behave exactly as under `queue:work`. Four strings cross into a worker
+thread, which rebuilds the job there and hands it to a subclass of Laravel's
+`Worker`. Deleting, releasing and failing all happen through the framework, which
+is how `maxTries`, `backoff`, `retryUntil`, job middleware, batches and
+`failed()` keep working unchanged.
+
+Reserving stops once the jobs handed over reach `threads × concurrency`. A
+reservation ages from the moment `pop()` returns, so filling a deep buffer would
+spend the window jobs need to run in; the queue therefore keeps its own count and
+is unaffected by the supervisor's `queue_size`.
+
+**Supported**, as keys of the queue rather than command options: `tries`,
+`timeout`, `backoff`, `max_jobs`, `max_time`, `stop_when_empty`, `force`, plus
+`queue:restart` and maintenance mode. A job's own `$tries`, `$timeout` and
+`$backoff` still win over the configured ones, as under `queue:work`.
+
+**Stopping.** `queue:restart` is the graceful way out and the one to use on
+deploy: the worker stops reserving, waits for the jobs in flight
+(`worker.shutdown_grace`, 60s by default) and only then exits, so a supervisor
+outside can start the new code. **SIGTERM and SIGINT do not drain** — thrun's
+supervisor cancels the thread pool where it stands, and jobs caught mid-run lose
+their thread and stay reserved until `retry_after` returns them to the queue.
+With `tries: 1` such a job is failed on redelivery without having finished.
+
+**A run that ends, ends the process.** `thrun:work` cancels its remaining
+supervisors as soon as the first one returns, and a composed receiver drops
+whatever its other queues had already buffered. That is what `queue:restart` is
+supposed to do, but it makes `stop_when_empty`, `max_jobs` and `max_time` a poor
+neighbour: give a queue that uses them a process of its own
+(`thrun:work --supervisor=drain`), not merely a supervisor of its own.
+
+On timeout the behaviour matches `queue:work`: a job with attempts left is left
+reserved and comes back when the reservation expires; out of attempts, it is
+failed once with `TimeoutExceededException`.
+
+**Not supported, and worth knowing before adopting:**
+
+- The timeout is cooperative. A job stuck in a blocking C call or a CPU loop
+  cannot be interrupted the way `pcntl_alarm` kills a process — it holds its
+  thread until it returns.
+- `--memory` and Horizon's `queue:pause` are not implemented.
+- A lost database connection does not recycle the worker. `queue:work` exits so
+  its supervisor restarts it with a fresh connection; here the thread keeps
+  going, so run behind something that restarts on failure and watch your logs.
+- `timeout` must stay below `retry_after`, the same rule `queue:work` has: a job
+  that outlives its reservation gets reserved a second time.
+- `retry_after` must also exceed the time a worker thread needs to boot the
+  application — a second or two on a cold cache. Set below that, the first jobs
+  of a run can have their reservations expire while the threads are still
+  starting; with `--tries=1` such a job is then failed without ever running.
+
+See `tests/e2e/native/` for the end-to-end check and how to run it.
+
+### Job Payload Compression
+
+Compresses the serialized body of **ordinary Laravel jobs** — the `data.command`
+field — with lz4. It applies to jobs dispatched the usual way, on Laravel's
+`redis` queue connection, and both `queue:work` and Horizon keep running them.
+(Thrun's own queues are a separate world with their own serializer; this setting
+does not touch them.)
+
+```php
+'compression' => [
+    'enabled'   => (bool) env('THRUN_COMPRESSION', false),
+    'min_bytes' => (int) env('THRUN_COMPRESSION_MIN_BYTES', 512),
+],
+```
+
+Requires [ext-lz4](https://github.com/kjdev/php-ext-lz4).
+
+Measured on PHP 8.6 (ZTS, TrueAsync), `serialize()` output of three job shapes:
+
+| Job | Plain | Compressed | Saved | Compress | Decompress |
+|---|---|---|---|---|---|
+| Notification, two scalars | 67 B | 67 B | — | 0.1 µs | — |
+| Mail to 50 recipients | 1709 B | 823 B | 52% | 2.0 µs | 2.4 µs |
+| Report export, 500 rows | 32210 B | 10851 B | 66% | 32.4 µs | 56.8 µs |
+
+Bodies below `min_bytes` are stored untouched — lz4 plus base64 costs more than
+it saves on small ones, as the first row shows.
+
+**Why only the body.** The JSON envelope around it stays JSON: Redis parses it
+server-side (`LuaScripts::pop()` runs `cjson.decode` to increment `attempts`) and
+Horizon reads the same JSON for its dashboard. Compressing the whole payload —
+for example by turning on phpredis' own serializer — breaks both, which is
+[laravel/horizon#1534](https://github.com/laravel/horizon/issues/1534).
+
+**Rollout and rollback.** The setting controls **writing** only; compressed
+bodies are always read. So a queue may hold both shapes at once, and turning the
+setting off leaves everything already queued runnable. To remove the package:
+turn compression off, drain the queues, then uninstall.
+
+Reading always on has a consequence worth stating plainly: installing this
+package replaces the framework's `CallQueuedHandler` and extends `queue:retry`,
+compression enabled or not. Both replacements only add the "unpack the body if it
+carries our marker" step and defer to the framework for everything else.
+
 ---
 
 ## Two Workflow Styles
