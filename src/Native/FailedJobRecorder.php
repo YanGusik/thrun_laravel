@@ -34,9 +34,9 @@ final readonly class FailedJobRecorder
         } catch (Throwable $e) {
             // This runs from the `finally` of Job::fail(), so anything thrown
             // here replaces the exception the job failed with and is then
-            // swallowed by Illuminate's worker. Both would vanish without this
-            // line — and the job is already gone from the queue, since it was
-            // deleted before the store was written.
+            // swallowed by Illuminate's worker — both would vanish. The job
+            // itself is already gone: it was deleted before the store was
+            // written.
             error_log(sprintf(
                 '[Thrun] could not record a failed job on queue "%s": %s: %s; the job failed with %s: %s',
                 $event->job->getQueue(),

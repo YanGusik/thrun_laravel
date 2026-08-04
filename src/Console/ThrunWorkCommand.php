@@ -76,10 +76,8 @@ final class ThrunWorkCommand extends Command
                     $startTime = hrtime(true);
                     $processed = $metrics->processed;
 
-                    // Sampled instead of read once at the end of the second: a
-                    // job usually lives for milliseconds, so a single reading
-                    // almost always lands between two of them and reports an
-                    // idle worker that is not idle.
+                    // A job usually lives for milliseconds, so one reading per
+                    // line lands between two of them and reports an idle worker.
                     $activePeak = $metrics->active;
 
                     $samples = intdiv(self::STATS_INTERVAL_MS, self::STATS_SAMPLE_MS);
@@ -137,9 +135,8 @@ final class ThrunWorkCommand extends Command
     /**
      * Prints a job that did not succeed.
      *
-     * Without this the console stays silent about failures: a Laravel job
-     * settles inside its own thread, so nothing reaches thrun's error path, and
-     * `--stats` shows totals that a reader has to be watching to notice.
+     * A Laravel job settles inside its own thread, so nothing reaches thrun's
+     * error path and the console would otherwise say nothing at all.
      *
      * @param array{ok: bool, outcome?: string, envelope: Envelope, error?: array{class: string, message: string}|null} $result
      */
