@@ -16,6 +16,10 @@ use Illuminate\Contracts\Config\Repository as ConfigContract;
 
 final class ThrunWorkCommand extends Command
 {
+    /** How often `--stats` looks at the number of running jobs, and how many times per line. */
+    private const int STATS_SAMPLE_MS = 50;
+    private const int STATS_SAMPLES = 20;
+
     protected $signature = 'thrun:work
                             {--supervisor= : Run a specific supervisor only}
                             {--stats : Show real-time stats UI}
@@ -71,14 +75,26 @@ final class ThrunWorkCommand extends Command
                 while (true) {
                     $startTime = hrtime(true);
                     $processed = $metrics->processed;
-                    \Async\delay(1000);
+
+                    // Sampled instead of read once at the end of the second: a
+                    // job usually lives for milliseconds, so a single reading
+                    // almost always lands between two of them and reports an
+                    // idle worker that is not idle.
+                    $activePeak = $metrics->active;
+
+                    for ($sample = 0; $sample < self::STATS_SAMPLES; $sample++) {
+                        \Async\delay(self::STATS_SAMPLE_MS);
+                        $activePeak = max($activePeak, $metrics->active);
+                    }
+
                     $line = sprintf(
-                        "  INFO  [%s] Processed: %d | Failed: %d | Timeout: %d | Active: %d | %.1f jobs/sec",
+                        "  INFO  [%s] Processed: %d | Failed: %d | Retried: %d | Timeout: %d | Active peak: %d | %.1f jobs/sec",
                         $label,
                         $metrics->processed,
                         $metrics->failed,
+                        $metrics->retried,
                         $metrics->timedOut,
-                        $metrics->active,
+                        $activePeak,
                         $metrics->throughput($startTime, $processed),
                     );
                     $this->info($line);
