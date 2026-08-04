@@ -239,6 +239,19 @@ reservation ages from the moment `pop()` returns, so filling a deep buffer would
 spend the window jobs need to run in; the queue therefore keeps its own count and
 is unaffected by the supervisor's `queue_size`.
 
+That count is kept per queue entry, not per supervisor. Two `laravel` queues
+listed in one supervisor each reserve up to `threads × concurrency`, so twice
+that many jobs can be held while the worker runs one batch through, and the
+surplus waits in the receiver's buffer with its reservations ageing. Nothing runs
+twice — a job whose reservation was taken over while it waited is left to its new
+owner — but it does mean a longer trip through `:reserved` and back. Where that
+matters, give each `laravel` queue a supervisor of its own.
+
+Several `laravel` entries in one supervisor are otherwise ordinary queues to the
+receiver: `strategy` decides which entry goes first, round-robin by default,
+while the `queues` list inside an entry keeps its own order — the first name is
+polled first.
+
 **Supported**, as keys of the queue rather than command options: `tries`,
 `timeout`, `backoff`, `max_jobs`, `max_time`, `stop_when_empty`, `force`, plus
 `queue:restart` and maintenance mode. A job's own `$tries`, `$timeout` and
