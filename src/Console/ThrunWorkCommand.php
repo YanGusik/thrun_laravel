@@ -16,9 +16,9 @@ use Illuminate\Contracts\Config\Repository as ConfigContract;
 
 final class ThrunWorkCommand extends Command
 {
-    /** How often `--stats` looks at the number of running jobs, and how many times per line. */
+    /** One `--stats` line per interval, built from readings taken this often. */
+    private const int STATS_INTERVAL_MS = 1000;
     private const int STATS_SAMPLE_MS = 50;
-    private const int STATS_SAMPLES = 20;
 
     protected $signature = 'thrun:work
                             {--supervisor= : Run a specific supervisor only}
@@ -82,7 +82,9 @@ final class ThrunWorkCommand extends Command
                     // idle worker that is not idle.
                     $activePeak = $metrics->active;
 
-                    for ($sample = 0; $sample < self::STATS_SAMPLES; $sample++) {
+                    $samples = intdiv(self::STATS_INTERVAL_MS, self::STATS_SAMPLE_MS);
+
+                    for ($sample = 0; $sample < $samples; $sample++) {
                         \Async\delay(self::STATS_SAMPLE_MS);
                         $activePeak = max($activePeak, $metrics->active);
                     }
