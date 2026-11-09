@@ -25,6 +25,47 @@ return [
         'video_processing' => [
             'transport' => 'redis',
         ],
+
+        // The application's own Laravel queue, drained by thrun instead of
+        // `queue:work`. Jobs and dispatch() calls stay exactly as they are.
+        //
+        // A supervisor that lists this queue boots a full Laravel application in
+        // every thread, and its concurrency drops to one job per thread unless
+        // bootstrap/app.php builds an AsyncApplication (yangusik/laravel-spawn):
+        // without it the jobs on a thread would share one container.
+        //
+        // Everything `queue:work` takes on the command line is written here, and
+        // what Horizon was already configured with fills in whatever is left out.
+        //
+        // 'laravel_jobs'  => [
+        //     'transport'       => 'laravel',
+        //
+        //     // null takes queue.default. Redis connections only.
+        //     'connection'      => null,
+        //
+        //     // Polled in order, so the first name is the highest priority.
+        //     // Omit the key to take Horizon's queues for this connection.
+        //     'queues'          => ['default'],
+        //
+        //     // Seconds to wait after finding every queue empty.
+        //     'sleep'           => 1.0,
+        //
+        //     // As --tries, --timeout and --backoff. A job that declares its own
+        //     // $tries or $timeout still wins, as it does under queue:work.
+        //     'tries'           => 1,
+        //     'timeout'         => 60,
+        //     'backoff'         => 0,
+        //
+        //     // Limits that end the run — and with it the whole process, since
+        //     // thrun:work stops its other supervisors once one of them returns.
+        //     // A queue that uses them wants a process of its own. 0 = no limit.
+        //     'max_jobs'        => 0,
+        //     'max_time'        => 0,
+        //     'stop_when_empty' => false,
+        //
+        //     // Keep working while the application is down for maintenance.
+        //     'force'           => false,
+        // ],
     ],
 
     // Supervisors — each is an isolated Supervisor + Worker pair.
@@ -38,6 +79,10 @@ return [
                 'threads'     => (int) env('THRUN_WORKER_THREADS', 2),
                 'concurrency' => (int) env('THRUN_WORKER_CONCURRENCY', 100),
                 'queue_size'  => (int) env('THRUN_WORKER_QUEUE_SIZE', 1000),
+
+                // Seconds a shutdown waits for jobs that do not end on their own.
+                // Only a run that can finish reaches it — see the laravel transport.
+                // 'shutdown_grace' => 60,
             ],
 
             'supervisor' => [
@@ -129,5 +174,30 @@ return [
         'App\\Handlers',
         'App\\Jobs',
         'App\\Events',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Job Payload Compression
+    |--------------------------------------------------------------------------
+    |
+    | Compresses the serialized job body of ordinary Laravel jobs (the
+    | `data.command` field) with lz4. The JSON envelope stays as it is, so
+    | Redis-side Lua and Horizon keep working.
+    |
+    | The setting controls writing only — compressed bodies are always read, so
+    | that turning it off leaves the jobs already queued runnable. To remove the
+    | package: turn this off, drain the queues, then uninstall.
+    |
+    | Requires ext-lz4: https://github.com/kjdev/php-ext-lz4
+    |
+    */
+
+    'compression' => [
+        'enabled'   => (bool) env('THRUN_COMPRESSION', false),
+
+        // Bodies below this size are stored as they are: lz4 plus base64 costs
+        // more than it saves on small ones.
+        'min_bytes' => (int) env('THRUN_COMPRESSION_MIN_BYTES', 512),
     ],
 ];

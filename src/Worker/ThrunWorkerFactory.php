@@ -6,9 +6,15 @@ namespace Thrun\Laravel\Worker;
 
 use Illuminate\Contracts\Config\Repository as ConfigContract;
 use Illuminate\Contracts\Container\Container;
+use Psr\Log\LoggerInterface;
 use ReflectionException;
+use Spawn\Laravel\Foundation\AsyncApplication;
 use Thrun\Laravel\Handler\AsThrunHandler;
 use Thrun\Laravel\Handler\Attribute\ThrunJob;
+use Thrun\Laravel\Native\LaravelQueueTransport;
+use Thrun\Laravel\Native\NativeJobHandler;
+use Thrun\Laravel\Native\NonLaravelFailureSender;
+use Thrun\Laravel\Native\ThreadBootstrapper;
 use Thrun\Laravel\Transport\TransportFactory;
 use Thrun\Supervisor\Supervisor;
 use Thrun\Supervisor\SupervisorOptions;
@@ -20,10 +26,14 @@ use Thrun\Worker\WorkerOptions;
 
 final readonly class ThrunWorkerFactory
 {
+    /** Seconds a shutdown waits for jobs that do not end on their own. */
+    private const DEFAULT_SHUTDOWN_GRACE_SECONDS = 60;
+
     public function __construct(
         private ConfigContract $config,
         private Container $container,
         private TransportFactory $transportFactory,
+        private LoggerInterface $logger,
     ) {
     }
 
@@ -35,7 +45,16 @@ final readonly class ThrunWorkerFactory
         ?\Closure $onResult = null,
     ): Worker {
         $supervisorConfig = $this->getSupervisor($supervisor);
+        $queueNames       = $supervisorConfig['queues'] ?? [];
+        $carriesLaravel   = $this->carriesLaravelJobs($queueNames);
         $handlers         = $this->resolveHandlers($supervisorConfig);
+
+        if ($carriesLaravel) {
+            // The only handler an ordinary Laravel job needs, and one no
+            // application can register for itself: the route key belongs to the
+            // transport, not to any message class.
+            $handlers[LaravelQueueTransport::ROUTE] = NativeJobHandler::class;
+        }
 
         if ($handlers === []) {
             throw new \RuntimeException(
@@ -49,27 +68,44 @@ final readonly class ThrunWorkerFactory
         $concurrency  = $workerConfig['concurrency'] ?? 10;
         $queueSize    = $workerConfig['queue_size'] ?? 1000;
 
+        if ($carriesLaravel) {
+            $concurrency = $this->isolatedConcurrency($concurrency, $supervisor);
+        }
+
         $resolvedMiddleware = array_merge(
             $this->resolveMiddleware($supervisorConfig['middleware'] ?? []),
             $middleware,
         );
 
         $receiver = $this->transportFactory->createReceiver(
-            queueNames: $supervisorConfig['queues'] ?? [],
+            queueNames: $queueNames,
             strategyConfig: $supervisorConfig['strategy'] ?? [],
             policyConfig: $supervisorConfig['policy'] ?? [],
+            maxInFlight: $threads * max(1, $concurrency),
         );
+
+        if ($carriesLaravel) {
+            $receiver = new DrainingReceiver(
+                $receiver,
+                $this->logger,
+                $workerConfig['shutdown_grace'] ?? self::DEFAULT_SHUTDOWN_GRACE_SECONDS,
+            );
+        }
 
         $failureTransport = $this->transportFactory->createFailedJobSender();
 
-        return new Worker(
+        if ($carriesLaravel) {
+            $failureTransport = new NonLaravelFailureSender($failureTransport);
+        }
+
+        $worker = new Worker(
             transport: $receiver,
             handlers: $handlers,
             options: new WorkerOptions(
                 threads: $threads,
                 concurrency: $concurrency,
                 queueSize: $queueSize,
-                bootloader: $this->createBootloader(),
+                bootloader: $carriesLaravel ? $this->createLaravelBootloader() : $this->createBootloader(),
                 middleware: $resolvedMiddleware,
                 onDispatch: $onDispatch,
                 onResult: $onResult,
@@ -77,6 +113,57 @@ final readonly class ThrunWorkerFactory
             failureTransport: $failureTransport,
             metrics: $metrics ?? new NullMetrics(),
         );
+
+        if ($receiver instanceof DrainingReceiver) {
+            $receiver->attachTo($worker->isIdle(...), $worker->stop(...));
+        }
+
+        return $worker;
+    }
+
+    /**
+     * Whether any of these queues hands out the application's own Laravel jobs.
+     *
+     * @param list<string> $queueNames
+     */
+    private function carriesLaravelJobs(array $queueNames): bool
+    {
+        $queues = $this->config->get('thrun.queues', []);
+
+        foreach ($queueNames as $name) {
+            if (($queues[$name]['transport'] ?? null) === 'laravel') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Jobs per thread, lowered to one when nothing keeps them apart.
+     *
+     * Several coroutines in a thread share the container, the log context and the
+     * transaction counter. laravel-spawn's async mode gives each of them its own;
+     * without it the only safe number is one, and the operator hears why rather
+     * than discovering it as mixed-up data.
+     *
+     * A configured zero is left alone: it means "no coroutines in the thread at
+     * all", which is stricter than one and not something to quietly relax.
+     */
+    private function isolatedConcurrency(int $configured, string $supervisor): int
+    {
+        if ($configured <= 1 || $this->container instanceof AsyncApplication) {
+            return max(0, $configured);
+        }
+
+        $this->logger->warning(
+            'Thrun: running one job per thread; concurrent jobs share one container unless bootstrap/app.php '
+            . 'builds an AsyncApplication (see laravel-spawn). Queues that carry no Laravel jobs keep their '
+            . 'concurrency in a supervisor of their own.',
+            ['supervisor' => $supervisor, 'configured_concurrency' => $configured],
+        );
+
+        return 1;
     }
 
     public function createSupervisor(
@@ -281,6 +368,21 @@ final readonly class ThrunWorkerFactory
                 \Spawn\Laravel\Server\TrueAsyncServer::initializeApp($app);
             }
         };
+    }
+
+    /**
+     * The bootloader for a worker that runs ordinary Laravel jobs.
+     *
+     * It does everything {@see createBootloader()} does and then some: a job
+     * expects the framework's async services, its own log context and a queue
+     * worker to run it, none of which a bare bootstrap leaves behind.
+     */
+    private function createLaravelBootloader(): \Closure
+    {
+        return ThreadBootstrapper::bootloader(
+            $this->container->basePath('vendor/autoload.php'),
+            $this->container->bootstrapPath('app.php'),
+        );
     }
 
     /**
